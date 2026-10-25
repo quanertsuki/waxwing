@@ -1,7 +1,6 @@
 # Waxwing
 
 [![CI](https://github.com/quanertsuki/waxwing/actions/workflows/ci.yml/badge.svg)](https://github.com/quanertsuki/waxwing/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/waxwing.svg)](https://www.npmjs.com/package/waxwing)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Waxwing is a local-first delegation manager for DeepSeek and OpenAI-compatible
@@ -38,11 +37,19 @@ multi-tenant service.
 
 Requires Node.js 20 or newer.
 
+The npm registry publication for `0.1.0` is pending. Until it is available,
+download `waxwing-0.1.0.tgz` from the
+[v0.1.0 release](https://github.com/quanertsuki/waxwing/releases/tag/v0.1.0)
+and install that file:
+
 ```bash
-npm install -g waxwing
+npm install -g ./waxwing-0.1.0.tgz
 waxwing health
 waxwing
 ```
+
+`npm install -g waxwing` becomes the supported install command after the
+package is published to the npm registry.
 
 The package installs two commands:
 

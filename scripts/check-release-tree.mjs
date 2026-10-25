@@ -1,5 +1,5 @@
 import {execFileSync} from 'node:child_process';
-import {readdirSync, readFileSync} from 'node:fs';
+import {existsSync, readdirSync, readFileSync} from 'node:fs';
 import path from 'node:path';
 
 function walk(directory, prefix = '') {
@@ -13,13 +13,13 @@ function walk(directory, prefix = '') {
 }
 
 let root;
-let tracked;
+let files;
 try {
   root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
   }).trim();
-  tracked = execFileSync('git', ['ls-files', '-z'], {
+  files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
     cwd: root,
     encoding: 'utf8',
   })
@@ -28,7 +28,7 @@ try {
     .map(file => file.replaceAll('\\', '/'));
 } catch {
   root = process.cwd();
-  tracked = walk(root);
+  files = walk(root);
 }
 
 const required = [
@@ -75,12 +75,13 @@ const machinePaths = [
   ['C:', 'Users', '16955'].join('\\'),
   ['I:', 'DS_subagent'].join('\\'),
 ];
+const presentFiles = files.filter(file => existsSync(path.join(root, file)));
 
 const errors = [];
 for (const file of required) {
-  if (!tracked.includes(file)) errors.push(`missing required release file: ${file}`);
+  if (!presentFiles.includes(file)) errors.push(`missing required release file: ${file}`);
 }
-for (const file of tracked) {
+for (const file of presentFiles) {
   if (forbiddenRoots.test(file) || forbiddenAnywhere.test(file) || forbiddenSecret.test(file)) {
     errors.push(`forbidden release path: ${file}`);
   }
@@ -96,4 +97,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`Release tree check passed: ${tracked.length} tracked files`);
+console.log(`Release tree check passed: ${presentFiles.length} release files`);

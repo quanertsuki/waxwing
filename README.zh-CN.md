@@ -1,7 +1,6 @@
 # Waxwing
 
 [![CI](https://github.com/quanertsuki/waxwing/actions/workflows/ci.yml/badge.svg)](https://github.com/quanertsuki/waxwing/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/waxwing.svg)](https://www.npmjs.com/package/waxwing)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Waxwing 是一个本地优先的委派管理器，面向 DeepSeek 和兼容 OpenAI 的编码
@@ -35,11 +34,17 @@ CLI、MCP stdio 和 Tauri 桌面端是同一管理器的三个入口。管理器
 
 需要 Node.js 20 或更高版本。
 
+`0.1.0` 尚未发布到 npm registry。发布前请从
+[v0.1.0 Release](https://github.com/quanertsuki/waxwing/releases/tag/v0.1.0)
+下载 `waxwing-0.1.0.tgz`，再安装该文件：
+
 ```bash
-npm install -g waxwing
+npm install -g ./waxwing-0.1.0.tgz
 waxwing health
 waxwing
 ```
+
+npm registry 发布完成后，推荐安装命令为 `npm install -g waxwing`。
 
 安装包提供两个命令：
 
