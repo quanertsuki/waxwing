@@ -165,6 +165,10 @@ try {
     ]),
     'global install',
   );
+  const moduleRootResult = npm(['root', '--global', '--prefix', prefix]);
+  assertExit(moduleRootResult, 'resolve global module root');
+  const moduleRoot = moduleRootResult.stdout.trim();
+  if (!moduleRoot) throw new Error('npm did not return a global module root');
 
   const help = runCli('waxwing', ['help']);
   assertExit(help, 'waxwing help');
@@ -183,7 +187,7 @@ try {
   }
 
   const mcp = await runMcp(
-    path.join(prefix, 'node_modules', 'waxwing', 'bin', 'waxwing-mcp.mjs'),
+    path.join(moduleRoot, 'waxwing', 'bin', 'waxwing-mcp.mjs'),
     env,
   );
   const initialized = mcp.responses.find(response => response.id === 1);
