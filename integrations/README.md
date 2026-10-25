@@ -42,10 +42,36 @@ existing scripts.
 
 ## Magpie
 
-[`waxwing.agent.js`](waxwing.agent.js) resolves Waxwing's per-user data
-directory and writes Magpie Provider configuration under `WAXWING_HOME`
-(`%LOCALAPPDATA%\Waxwing` on Windows by default). Place the file in Magpie's
-Agent plugin directory and reload plugins.
+Magpie's agent-plugin sandbox exposes only `console`; it has no
+`import.meta.url`, `process`, or Node modules. Magpie itself expands `~` and
+`$VAR` in the plugin's `dir` and `config` paths.
+
+From a source checkout, generate a machine-local plugin with the same data
+directory and Provider directory the current Waxwing configuration uses:
+
+```powershell
+npm run magpie:plugin
+magpie plugin add "<checkout>/integrations/.local/waxwing.agent.js"
+```
+
+The generated file contains local paths and is ignored by Git. Do not commit
+it. Reload Magpie's plugins after adding or regenerating the file.
+
+For an environment-managed installation, use the checked-in
+[`waxwing.agent.js`](waxwing.agent.js) instead. Set `WAXWING_REPO` to the
+Waxwing checkout or installation root and `WAXWING_PROVIDERS_DIR` to the
+providers directory used by the manager before starting Magpie:
+
+```powershell
+$env:WAXWING_REPO = (Resolve-Path "<checkout>").Path
+$env:WAXWING_PROVIDERS_DIR = (Resolve-Path "<checkout>\data\providers").Path
+magpie plugin add "<checkout>\integrations\waxwing.agent.js"
+```
+
+A default packaged install uses
+`%LOCALAPPDATA%\Waxwing\providers\magpie.json`, so its
+`WAXWING_PROVIDERS_DIR` is
+`%LOCALAPPDATA%\Waxwing\providers`.
 
 [`set-waxwing-order.cmd`](set-waxwing-order.cmd) is a Windows model-order
 example. Set `MAGPIE_CLI` when the CLI is not on `PATH`.

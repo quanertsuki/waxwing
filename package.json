@@ -72,6 +72,7 @@
     "desktop:resources": "node scripts/prepare-desktop-resources.mjs",
     "desktop:portable": "node scripts/build-portable.mjs",
     "desktop:tauri": "npm --prefix desktop run tauri",
+    "magpie:plugin": "node scripts/generate-magpie-plugin.mjs",
     "check:release-tree": "node scripts/check-release-tree.mjs",
     "check": "npm run check:release-tree && npm test && npm run desktop:build",
     "prepublishOnly": "npm test"

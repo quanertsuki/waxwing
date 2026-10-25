@@ -30,6 +30,7 @@ server-token
 .npm-cache/
 $null
 docs/magpie-agent-plugin-report-*.md
+/integrations/.local/
 
 # CodeGraph
 .codegraph/
