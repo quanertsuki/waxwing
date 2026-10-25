@@ -1,6 +1,7 @@
 import {execFileSync} from 'node:child_process';
 import {existsSync, readdirSync, readFileSync} from 'node:fs';
 import path from 'node:path';
+import {pathToFileURL} from 'node:url';
 
 function walk(directory, prefix = '') {
   const files = [];
@@ -71,30 +72,41 @@ const textExtensions = new Set([
   '.yml',
   '.yaml',
 ]);
-const machinePaths = [
-  ['C:', 'Users', '16955'].join('\\'),
-  ['I:', 'DS_subagent'].join('\\'),
+const machinePathPatterns = [
+  /[A-Za-z]:\/Users\/[^/\s"'`<>]+/i,
+  /[A-Za-z]:\/DS_subagent(?:\/|$)/i,
+  /(?:^|[\s"'`(])\/(?:home|Users)\/[^/\s"'`<>]+(?:\/|$)/m,
 ];
 const presentFiles = files.filter(file => existsSync(path.join(root, file)));
 
-const errors = [];
-for (const file of required) {
-  if (!presentFiles.includes(file)) errors.push(`missing required release file: ${file}`);
-}
-for (const file of presentFiles) {
-  if (forbiddenRoots.test(file) || forbiddenAnywhere.test(file) || forbiddenSecret.test(file)) {
-    errors.push(`forbidden release path: ${file}`);
-  }
-  if (!textExtensions.has(path.extname(file).toLowerCase())) continue;
-  const content = readFileSync(path.join(root, file), 'utf8');
-  if (machinePaths.some(value => content.toLowerCase().includes(value.toLowerCase()))) {
-    errors.push(`machine-specific path in: ${file}`);
-  }
+export function findMachineSpecificPath(content) {
+  const normalized = String(content).replaceAll('\\', '/');
+  return machinePathPatterns.some(pattern => pattern.test(normalized));
 }
 
-if (errors.length > 0) {
-  console.error(errors.join('\n'));
-  process.exit(1);
+export function checkReleaseTree({releaseFiles = presentFiles} = {}) {
+  const errors = [];
+  for (const file of required) {
+    if (!releaseFiles.includes(file)) errors.push(`missing required release file: ${file}`);
+  }
+  for (const file of releaseFiles) {
+    if (forbiddenRoots.test(file) || forbiddenAnywhere.test(file) || forbiddenSecret.test(file)) {
+      errors.push(`forbidden release path: ${file}`);
+    }
+    if (!textExtensions.has(path.extname(file).toLowerCase())) continue;
+    const content = readFileSync(path.join(root, file), 'utf8');
+    if (findMachineSpecificPath(content)) errors.push(`machine-specific path in: ${file}`);
+  }
+  return errors;
 }
 
-console.log(`Release tree check passed: ${presentFiles.length} release files`);
+const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (isMain) {
+  const errors = checkReleaseTree();
+  if (errors.length > 0) {
+    console.error(errors.join('\n'));
+    process.exit(1);
+  }
+
+  console.log(`Release tree check passed: ${presentFiles.length} release files`);
+}
