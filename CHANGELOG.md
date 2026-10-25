@@ -5,6 +5,24 @@ and uses semantic versioning for public releases.
 
 ## [Unreleased]
 
+### Changed
+
+- Routine npm, Cargo, Tauri, and GitHub Actions updates are grouped while
+  semantic-major upgrades remain individually reviewable
+- GitHub Actions use checkout/setup-node v7, upload-artifact v7,
+  download-artifact v8, and gitleaks-action v3
+- Tauri desktop dependencies use tauri 2.12.5, tauri-build 2.7.4, and Tauri CLI
+  2.12.4
+- npm package, desktop package, Rust crate, and Windows bundle metadata
+  attribute the release to `quanertsuki`
+- Installation docs point to the verified v0.1.0 tarball until npm registry
+  publication is complete
+
+### Fixed
+
+- The release-tree check includes non-ignored working files, skips deleted
+  tracked files, and still fails when a required release file is absent
+
 ## [0.1.0] - 2026-10-25
 
 ### Added

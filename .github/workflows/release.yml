@@ -16,14 +16,14 @@ jobs:
     name: Build npm tarball
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Pack npm release
         run: npm pack
       - name: Upload npm tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: npm-tarball
           path: waxwing-*.tgz
@@ -33,8 +33,8 @@ jobs:
     name: Build Windows preview
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -46,7 +46,7 @@ jobs:
       - name: Build unsigned portable archive
         run: npm run desktop:portable
       - name: Upload Windows preview
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-preview
           path: |
@@ -65,7 +65,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: npm-tarball
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
