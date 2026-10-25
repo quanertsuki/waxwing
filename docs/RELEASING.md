@@ -69,8 +69,10 @@ matching `v*`.
 
 ## 4. Publish npm
 
-The release workflow publishes the tarball when the repository secret
-`NPM_TOKEN` exists. A first manual publish can be performed instead:
+The release workflow publishes the tarball only when the repository variable
+`PUBLISH_NPM` is `true` and the repository secret `NPM_TOKEN` exists. The
+default for a new repository is no registry publication. A first manual publish
+can be performed instead:
 
 ```bash
 npm publish waxwing-0.1.0.tgz --access public
