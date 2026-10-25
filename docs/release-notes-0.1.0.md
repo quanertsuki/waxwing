@@ -23,6 +23,9 @@ statistics on the local machine.
 - `waxwing-0.1.0-windows-x64.zip`: unsigned portable Windows desktop build.
 - `SHA256SUMS`: checksums for the release artifacts.
 
+The npm registry publication is pending. Install the tarball above until
+`npm install -g waxwing` becomes available.
+
 Verify downloaded files before running them:
 
 ```powershell

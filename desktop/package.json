@@ -2,6 +2,7 @@
   "name": "waxwing-desktop",
   "version": "0.1.0",
   "description": "Waxwing desktop delegation manager",
+  "author": "quanertsuki",
   "private": true,
   "type": "module",
   "engines": {

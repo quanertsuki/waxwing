@@ -4,15 +4,59 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: npm
     directory: /desktop
     schedule:
       interval: weekly
+    groups:
+      tauri-minor-patch:
+        patterns:
+          - "@tauri-apps/*"
+        update-types:
+          - minor
+          - patch
+      desktop-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@tauri-apps/*"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: cargo
     directory: /desktop/src-tauri
     schedule:
       interval: weekly
+    groups:
+      tauri-rust-minor-patch:
+        patterns:
+          - "tauri*"
+        update-types:
+          - minor
+          - patch
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "tauri*"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
