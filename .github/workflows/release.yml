@@ -57,6 +57,7 @@ jobs:
   npm-publish:
     name: Publish npm package
     needs: npm-package
+    if: ${{ vars.PUBLISH_NPM == 'true' }}
     runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -68,14 +69,12 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - name: Publish when NPM_TOKEN is configured
-        shell: bash
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN}" ]; then
-            echo "NPM_TOKEN is not configured; release asset remains available."
-            exit 0
-          fi
-          npm publish ./waxwing-*.tgz --access public
+      - name: Publish npm package
+        if: ${{ env.NODE_AUTH_TOKEN != '' }}
+        run: npm publish ./waxwing-*.tgz --access public
+      - name: Report missing npm token
+        if: ${{ env.NODE_AUTH_TOKEN == '' }}
+        run: echo "NPM_TOKEN is not configured; GitHub Release remains the install source."
 
   github-release:
     name: Publish GitHub release
