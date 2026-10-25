@@ -36,6 +36,8 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "quanertsuki",
+    "copyright": "Copyright (c) 2026 quanertsuki",
     "resources": [
       "resources/**/*"
     ],
