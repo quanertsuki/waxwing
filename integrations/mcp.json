@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "waxwing": {
+      "command": "waxwing-mcp"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "magpie",
+  "type": "openai-chat",
+  "baseUrl": "https://example.invalid/v1",
+  "apiKeyEnv": "TEST_MAGPIE_API_KEY",
+  "model": "test-model",
+  "supportsTools": true,
+  "supportsReasoning": true
+}

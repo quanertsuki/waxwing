@@ -1,0 +1,10 @@
+{
+  "name": "openai-compatible",
+  "type": "openai-chat",
+  "baseUrl": "https://api.example.com/v1",
+  "apiKeyEnv": "OPENAI_API_KEY",
+  "model": "your-model",
+  "supportsTools": true,
+  "supportsReasoning": false,
+  "stream": true
+}

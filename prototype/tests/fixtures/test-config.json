@@ -1,0 +1,5 @@
+{
+  "defaultProvider": "deepseek-flash",
+  "fallbackProvider": "deepseek-flash",
+  "workspaceMode": "shared"
+}

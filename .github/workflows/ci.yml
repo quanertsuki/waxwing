@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check release tree
+        run: npm run check:release-tree
+      - name: Run core tests
+        run: npm test
+      - name: Check public CLI entry point
+        run: node bin/waxwing.mjs help
+
+  package:
+    name: Package smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Inspect npm package contents
+        run: npm pack --dry-run --json
+      - name: Install and exercise packed package
+        run: npm run package:smoke
+
+  desktop:
+    name: Desktop and Windows portable
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
+      - name: Prepare desktop resources
+        run: npm run desktop:resources
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
+      - name: Check Rust
+        run: cargo check --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Test Rust command helpers
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Build unsigned portable archive
+        run: npm run desktop:portable
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waxwing-windows-preview
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

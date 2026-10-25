@@ -1,0 +1,18 @@
+[
+  {
+    "insert": [
+      {
+        "id": "mcp-waxwing",
+        "name": "@deepseek-ai/dsh-mcp-client",
+        "config": {
+          "serverName": "waxwing",
+          "transport": "stdio",
+          "command": "waxwing-mcp",
+          "args": [],
+          "toolCallTimeoutMs": 45000,
+          "failOnStartupError": true
+        }
+      }
+    ]
+  }
+]

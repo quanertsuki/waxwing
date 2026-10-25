@@ -1,0 +1,56 @@
+# Sensitive data
+/data/
+/prototype-data/
+prototype/config.local.json
+*.local.json
+*.credentials*
+server-token
+*.grant.json
+/demo-workspace/
+*.output
+
+# Internal working records
+/dispatch/
+/handoffs/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs and local archives
+*.log
+/logs/
+.internal/
+.local-archive/
+.npm-cache/
+$null
+docs/magpie-agent-plugin-report-*.md
+
+# CodeGraph
+.codegraph/
+
+# Tauri build artifacts
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/resources/
+desktop/dist/
+desktop/node_modules/
+dist/
+
+# Test temp files
+tests/.tmp/
+prototype/tests/.tmp/
+
+# Large directories
+/acceptance/
+/research/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

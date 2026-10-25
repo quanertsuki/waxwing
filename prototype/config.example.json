@@ -1,0 +1,28 @@
+{
+  "dshRepo": "../deepseek-harness",
+  "credentialsFile": "../deepseek-harness/data/.credentials.yaml",
+  "node": "",
+  "port": 43187,
+  "model": "deepseek-flash",
+  "maxTokens": 393216,
+  "defaultEffort": "high",
+  "roundTimeoutSeconds": 1800,
+  "maxRounds": 8,
+  "defaultProvider": "dsh-sdk",
+  "fallbackProvider": "dsh-sdk",
+  "workspaceMode": "auto",
+  "worktreeContainerName": ".waxwing-worktrees",
+  "ackTimeoutSeconds": 10,
+  "executionPolicy": {
+    "enabled": true,
+    "file": "execution-policy.md",
+    "version": 1
+  },
+  "usageLimits": {
+    "enabled": false,
+    "warnCostCny": 3,
+    "blockCostCny": 5,
+    "warnRequests": 100,
+    "blockRequests": 160
+  }
+}

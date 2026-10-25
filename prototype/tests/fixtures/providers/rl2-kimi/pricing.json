@@ -1,0 +1,19 @@
+{
+  "currency": "CNY",
+  "unit": "per 1M tokens",
+  "effectiveAt": "2026-10-21",
+  "source": "test fixture with zero-cost rates",
+  "peakRule": {
+    "timezone": "Asia/Shanghai",
+    "weekdays": [0, 1, 2, 3, 4, 5, 6],
+    "windows": [["00:00", "24:00"]],
+    "holidayCalendarModeled": false
+  },
+  "models": {
+    "llm-default": {
+      "aliases": [],
+      "peak": {"cacheHit": 0, "cacheMiss": 0, "output": 0},
+      "offPeak": {"cacheHit": 0, "cacheMiss": 0, "output": 0}
+    }
+  }
+}

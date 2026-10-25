@@ -1,0 +1,78 @@
+{
+  "name": "waxwing",
+  "version": "0.1.0",
+  "description": "Local-first delegation manager for DeepSeek and OpenAI-compatible coding agents.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quanertsuki/waxwing.git"
+  },
+  "bugs": {
+    "url": "https://github.com/quanertsuki/waxwing/issues"
+  },
+  "homepage": "https://github.com/quanertsuki/waxwing#readme",
+  "keywords": [
+    "agent",
+    "deepseek",
+    "local-first",
+    "mcp",
+    "openai-compatible",
+    "tauri"
+  ],
+  "type": "module",
+  "bin": {
+    "waxwing": "./bin/waxwing.mjs",
+    "waxwing-mcp": "./bin/waxwing-mcp.mjs"
+  },
+  "exports": {
+    ".": "./src/app.mjs",
+    "./cli": "./bin/waxwing.mjs",
+    "./mcp": "./prototype/mcp.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "prototype/*.mjs",
+    "!prototype/Cancel-Smoke.mjs",
+    "!prototype/README.md",
+    "prototype/config.json",
+    "prototype/config.example.json",
+    "prototype/config.local.example.json",
+    "prototype/execution-policy.md",
+    "prototype/pricing.json",
+    "prototype/providers/",
+    "examples/",
+    "docs/architecture.md",
+    "docs/assets/",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bin/waxwing.mjs tui",
+    "server": "node prototype/server.mjs",
+    "demo": "node bin/waxwing.mjs demo",
+    "test": "node prototype/tests/run.mjs",
+    "test:minitodo": "npm --prefix apps/minitodo test",
+    "package:smoke": "node scripts/package-smoke.mjs",
+    "desktop:build": "npm --prefix desktop run build",
+    "desktop:icons": "npm --prefix desktop run tauri -- icon src-tauri/icons/app-icon.svg",
+    "desktop:resources": "node scripts/prepare-desktop-resources.mjs",
+    "desktop:portable": "node scripts/build-portable.mjs",
+    "desktop:tauri": "npm --prefix desktop run tauri",
+    "check:release-tree": "node scripts/check-release-tree.mjs",
+    "check": "npm run check:release-tree && npm test && npm run desktop:build",
+    "prepublishOnly": "npm test"
+  }
+}

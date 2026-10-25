@@ -1,0 +1,60 @@
+flowchart LR
+  Human["Human operator"]
+  Delegator["Delegating Agent"]
+
+  subgraph Adapters["Entry adapters"]
+    CLI["CLI<br/>waxwing"]
+    MCP["MCP stdio<br/>waxwing_* plus ds_* aliases"]
+    Desktop["Tauri desktop"]
+  end
+
+  Gateway["Loopback HTTP gateway<br/>127.0.0.1 + bearer token"]
+
+  subgraph Manager["Local manager: single state owner"]
+    Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
+    Runtime["RuntimeSupervisor<br/>round gate + heartbeat + recovery"]
+    Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
+    Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
+    Usage["UsageService<br/>metrics; limits opt-in"]
+    Providers["ProviderRegistry<br/>DSH SDK + OpenAI-compatible"]
+  end
+
+  Worker["Worker Agent"]
+  Protocol["Round protocol<br/>run -> ack -> events -> released"]
+  Tools["Tool loop<br/>unlimited requests by default"]
+  Workspace["Shared workspace<br/>or isolated Git worktree"]
+  DSH["DeepSeek Harness"]
+  API["OpenAI-compatible API"]
+  Data[("Per-user data directory<br/>runs / runtime / reports")]
+  Legacy["prototype compatibility facade<br/>copy-only legacy import"]
+
+  Human --> CLI
+  Human --> Desktop
+  Delegator --> CLI
+  Delegator --> MCP
+  Delegator --> Desktop
+  CLI --> Gateway
+  MCP --> Gateway
+  Desktop --> Gateway
+
+  Gateway --> Tasks
+  Gateway --> Acceptance
+  Gateway --> Usage
+  Tasks <--> Runtime
+  Tasks <--> Lease
+  Tasks <--> Data
+  Acceptance --> Data
+  Runtime --> Data
+
+  Runtime --> Protocol
+  Protocol <--> Worker
+  Worker --> Providers
+  Providers --> DSH
+  Providers --> API
+  Worker --> Tools
+  Tools --> Workspace
+  Lease <--> Workspace
+
+  Legacy -. forwards to .-> Gateway
+  CLI -. compatibility .-> Legacy
+  MCP -. compatibility .-> Legacy

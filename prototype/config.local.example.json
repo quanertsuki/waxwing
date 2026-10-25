@@ -1,0 +1,9 @@
+{
+  "dshRepo": "../deepseek-harness",
+  "credentialsFile": "../deepseek-harness/data/.credentials.yaml",
+  "node": "",
+  "root": "../data",
+  "providersDir": "../data/providers",
+  "defaultProvider": "dsh-sdk",
+  "fallbackProvider": "dsh-sdk"
+}

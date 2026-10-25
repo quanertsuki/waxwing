@@ -1,0 +1,19 @@
+{
+  "currency": "CNY",
+  "unit": "per 1M tokens",
+  "effectiveAt": "2026-10-20",
+  "source": "test fixture based on published DeepSeek pricing",
+  "peakRule": {
+    "timezone": "Asia/Shanghai",
+    "weekdays": [1, 2, 3, 4, 5],
+    "windows": [["09:00", "12:00"], ["14:00", "18:00"]],
+    "holidayCalendarModeled": false
+  },
+  "models": {
+    "deepseek-flash": {
+      "aliases": ["deepseek-v4-flash"],
+      "peak": {"cacheHit": 0.04, "cacheMiss": 2, "output": 8},
+      "offPeak": {"cacheHit": 0.02, "cacheMiss": 1, "output": 4}
+    }
+  }
+}

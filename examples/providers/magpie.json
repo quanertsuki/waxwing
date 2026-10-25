@@ -1,0 +1,9 @@
+{
+  "name": "magpie",
+  "type": "openai-chat",
+  "baseUrl": "http://127.0.0.1:3425",
+  "apiKeyEnv": "MAGPIE_API_KEY",
+  "model": "group/waxwing",
+  "supportsTools": true,
+  "supportsReasoning": true
+}

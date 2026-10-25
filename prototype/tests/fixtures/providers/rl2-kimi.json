@@ -1,0 +1,9 @@
+{
+  "name": "rl2-kimi",
+  "type": "openai-chat",
+  "baseUrl": "https://example.invalid/v1",
+  "apiKeyEnv": "TEST_RL2_API_KEY",
+  "model": "llm-default",
+  "supportsTools": true,
+  "supportsReasoning": true
+}

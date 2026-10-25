@@ -1,0 +1,20 @@
+{
+  "name": "minitodo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MiniTodo - 零依赖的本地待办清单命令行工具（中文）",
+  "type": "module",
+  "bin": {
+    "minitodo": "./todo.mjs"
+  },
+  "main": "./todo.mjs",
+  "scripts": {
+    "start": "node todo.mjs",
+    "test": "node --test --test-isolation=none \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=24.12"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
