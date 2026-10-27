@@ -221,6 +221,26 @@ export class AcceptanceService {
     return {task: {...task, reportHash: report.hash}, file: report.file, hash: report.hash};
   }
 
+  /**
+   * Persist an acceptance and its report through one module-owned sequence.
+   * The caller supplies the already-validated lifecycle record and the save
+   * adapter; report/hash persistence is inserted between acceptance and
+   * lifecycle save so no caller can save one without the other.
+   */
+  acceptAndSave(task, {evidence, policySection = '', save} = {}) {
+    if (typeof save !== 'function') throw new Error('save dependency is required');
+    const accepted = this.accept(task, {evidence, policySection});
+    return save(accepted.task);
+  }
+
+  /** Persist a refreshed report and its new hash as one module-owned step. */
+  exportAndSave(task, {policySection = '', save} = {}) {
+    if (typeof save !== 'function') throw new Error('save dependency is required');
+    const exported = this.exportReport(task, {policySection});
+    save(exported.task);
+    return {file: exported.file, hash: exported.hash};
+  }
+
   /** Deletion preview; every precondition lives in previewTaskDeletion. */
   preview(task, {directory, live = false} = {}) {
     return previewTaskDeletion(task, {
@@ -300,6 +320,20 @@ export class AcceptanceService {
     fs.rmSync(preview.directory, {recursive: true});
     this.forgetGrant(task.id);
     return {deleted: task.id, preserved: preview.preserved};
+  }
+
+  /**
+   * Delete authorized scratch data, then hand the now-empty task ID to the
+   * caller's index cleanup. If index removal fails after deletion, the task
+   * remains indexable for manual cleanup rather than being silently forgotten.
+   */
+  removeTaskAndForget(task, {directory, live = false, forget} = {}) {
+    const deleted = this.removeTask(task, {directory, live});
+    if (forget !== undefined) {
+      if (typeof forget !== 'function') throw new Error('forget dependency must be a function');
+      forget(task.id);
+    }
+    return deleted;
   }
 
   /**
