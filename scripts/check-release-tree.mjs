@@ -56,6 +56,7 @@ export const required = [
   'src/tasks/view.mjs',
   'src/tasks/transaction.mjs',
   'src/tasks/repository.mjs',
+  'src/usage/execution-policy.mjs',
   'src/usage/policy.mjs',
   'src/usage/service.mjs',
   'src/workspace/lease-manager.mjs',

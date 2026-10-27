@@ -28,8 +28,9 @@ interface.
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
 | `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification |
 | `src/research/service.mjs` | Parallel read-only research shards, scratch workspaces, partial results, aggregate reports |
+| `src/usage/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
-| `src/usage/service.mjs` | Metrics facade plus one unavailable-snapshot projection; optional thresholds are disabled by default |
+| `src/usage/service.mjs` | Metrics facade; unavailable snapshots use the same projection as the manager; optional thresholds are disabled by default |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
 | `prototype/` | Legacy entry-point and data compatibility until at least `0.2.0` |

@@ -16,6 +16,7 @@ export {Runtime, roundTimeouts} from './runtime/module.mjs';
 export {RuntimeLifecycle} from './runtime/lifecycle.mjs';
 export {RuntimeSupervisor} from './runtime/supervisor.mjs';
 export {UsageService} from './usage/service.mjs';
+export {ExecutionPolicy} from './usage/execution-policy.mjs';
 export {
   blockReason,
   completeLimits,
@@ -25,6 +26,7 @@ export {
   mergeLimits,
   overrideEvent,
   parseOverride,
+  unavailableUsageSnapshot,
   validateLimits,
 } from './usage/policy.mjs';
 export {ResearchBatchService} from './research/service.mjs';

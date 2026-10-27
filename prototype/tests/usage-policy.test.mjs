@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   blockReason,
   completeLimits,
@@ -9,7 +12,13 @@ import {
   mergeLimits,
   overrideEvent,
   parseOverride,
+  unavailableUsageSnapshot,
 } from '../../src/usage/policy.mjs';
+import {
+  DEFAULT_POLICY_FILE,
+  ExecutionPolicy,
+  digestText,
+} from '../../src/usage/execution-policy.mjs';
 
 const limits = {
   enabled: true,
@@ -178,4 +187,167 @@ test('override event is a detached snapshot of usage and limits', () => {
   });
   assert.notEqual(event.limitsBefore, limits);
   assert.deepEqual(event.limitsBefore, limits);
+});
+
+test('an unavailable usage snapshot degrades observability without blocking rework', () => {
+  const task = {
+    lastLimitOverride: {
+      at: '2026-10-27T00:00:00.000Z',
+      reason: 'operator approval',
+    },
+  };
+  const snapshot = unavailableUsageSnapshot({
+    task,
+    reason: 'events.jsonl is a directory',
+    limits,
+  });
+  assert.equal(snapshot.available, false);
+  assert.equal(snapshot.computed, null);
+  assert.deepEqual(snapshot.usageRounds, []);
+  assert.deepEqual(snapshot.listUsage, {
+    available: false,
+    error: 'events.jsonl is a directory',
+  });
+  assert.deepEqual(snapshot.limits, limits);
+  assert.equal(snapshot.statusUsage.available, false);
+  assert.equal(snapshot.statusUsage.error, 'events.jsonl is a directory');
+  assert.equal(snapshot.statusUsage.limitState, 'unavailable');
+  assert.equal(snapshot.statusUsage.limitWarning, true);
+  assert.equal(snapshot.statusUsage.limitBlocked, false);
+  assert.equal(snapshot.statusUsage.limitsEvaluated, false);
+  assert.deepEqual(snapshot.statusUsage.warnings, [
+    'Usage data is unavailable: events.jsonl is a directory',
+  ]);
+  assert.deepEqual(snapshot.statusUsage.limitOverride, {
+    at: '2026-10-27T00:00:00.000Z',
+    reason: 'operator approval',
+  });
+  assert.equal(decideRework({usage: snapshot.statusUsage}).allowed, true);
+
+  const disabled = unavailableUsageSnapshot({
+    reason: 'metrics unavailable',
+    limits: {...limits, enabled: false},
+  });
+  assert.equal(disabled.statusUsage.limitState, 'disabled');
+  assert.equal(disabled.statusUsage.limitWarning, false);
+  assert.equal(disabled.statusUsage.limitBlocked, false);
+});
+
+test('the execution policy defaults to disabled when configuration is absent or invalid', () => {
+  const baseDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-policy-'));
+  try {
+    for (const configuration of [undefined, null, [], 'enabled']) {
+      const policy = new ExecutionPolicy({configuration, baseDirectory});
+      assert.deepEqual(policy.settings(), {enabled: false, version: null, file: null});
+      assert.equal(policy.filePath(), path.join(baseDirectory, DEFAULT_POLICY_FILE));
+      assert.deepEqual(policy.round(), {
+        meta: {
+          enabled: false,
+          version: null,
+          sha256: null,
+          applied: false,
+        },
+        text: null,
+      });
+    }
+  } finally {
+    fs.rmSync(baseDirectory, {recursive: true, force: true});
+  }
+});
+
+test('execution policy reads versioned text, hashes it, and appends it once', () => {
+  const baseDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-policy-'));
+  const file = path.join(baseDirectory, 'rules.md');
+  const policyText = 'Do not delete evidence.';
+  try {
+    fs.writeFileSync(file, policyText);
+    const policy = new ExecutionPolicy({
+      configuration: {enabled: true, version: 7, file: 'rules.md'},
+      baseDirectory,
+    });
+    assert.equal(policy.filePath(), file);
+    const round = policy.round();
+    assert.deepEqual(round, {
+      meta: {
+        enabled: true,
+        version: 7,
+        sha256: digestText(policyText),
+        applied: true,
+      },
+      text: policyText,
+    });
+    const prompt = policy.prompt('Implement it.', round);
+    assert.equal(prompt, `Implement it.\n---\n${policyText}`);
+    assert.equal(prompt.split(policyText).length - 1, 1);
+  } finally {
+    fs.rmSync(baseDirectory, {recursive: true, force: true});
+  }
+});
+
+test('a missing or empty policy file warns but never becomes applied', () => {
+  const baseDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-policy-'));
+  try {
+    const missing = new ExecutionPolicy({
+      configuration: {enabled: true, version: 1, file: 'missing.md'},
+      baseDirectory,
+    });
+    const missingRound = missing.round();
+    assert.equal(missingRound.meta.applied, false);
+    assert.equal(missingRound.meta.sha256, null);
+    assert.match(missingRound.meta.warning, /unavailable/i);
+    assert.equal(missing.prompt('unchanged', missingRound), 'unchanged');
+
+    fs.writeFileSync(path.join(baseDirectory, 'empty.md'), ' \r\n');
+    const empty = new ExecutionPolicy({
+      configuration: {enabled: true, version: 1, file: 'empty.md'},
+      baseDirectory,
+    });
+    const emptyRound = empty.round();
+    assert.equal(emptyRound.meta.applied, false);
+    assert.equal(emptyRound.meta.sha256, null);
+    assert.match(emptyRound.meta.warning, /empty/i);
+    assert.equal(empty.prompt('unchanged', emptyRound), 'unchanged');
+  } finally {
+    fs.rmSync(baseDirectory, {recursive: true, force: true});
+  }
+});
+
+test('the report uses the applied round snapshot even after the policy changes', () => {
+  const baseDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-policy-'));
+  const file = path.join(baseDirectory, 'rules.md');
+  const appliedText = 'Rule A';
+  try {
+    fs.writeFileSync(file, appliedText);
+    const policy = new ExecutionPolicy({
+      configuration: {enabled: true, version: 3, file: 'rules.md'},
+      baseDirectory,
+    });
+    const applied = policy.round();
+    const task = {
+      rounds: [
+        {number: 1, policy: {enabled: true, version: 2, sha256: 'old', applied: true}},
+        {number: 2, policy: applied.meta},
+      ],
+      policySnapshot: {
+        version: applied.meta.version,
+        sha256: applied.meta.sha256,
+        text: applied.text,
+      },
+    };
+    fs.writeFileSync(file, 'Rule B');
+    const section = policy.reportSection(task);
+    assert.match(section, /Version: 3/);
+    assert.match(section, new RegExp(applied.meta.sha256));
+    assert.match(section, new RegExp(digestText('Rule B')));
+    assert.match(section, /policy changed after the applied round/);
+    assert.match(section, /Rule A/);
+    assert.doesNotMatch(section, /Rule B/);
+
+    fs.rmSync(file);
+    const missing = policy.reportSection(task);
+    assert.match(missing, new RegExp(applied.meta.sha256));
+    assert.match(missing, /Rule A/);
+  } finally {
+    fs.rmSync(baseDirectory, {recursive: true, force: true});
+  }
 });
