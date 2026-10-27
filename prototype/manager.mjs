@@ -22,6 +22,7 @@ import {
 } from '../src/usage/policy.mjs';
 import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
+import {RuntimeLifecycle} from '../src/runtime/lifecycle.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
 import {TaskRepository} from '../src/tasks/repository.mjs';
 import {TaskTransaction} from '../src/tasks/transaction.mjs';
@@ -708,48 +709,16 @@ export function createManager(options = {}) {
         }
         if (runtime) {
           const verification = verifyOwnedRuntime(runtime);
-          if (verification.verified) {
-            try {
-              terminateVerifiedRuntime(runtime);
-              runtime = {
-                ...runtime,
-                phase: 'recovered-terminated',
-                manualActionRequired: false,
-                recovery: {at: new Date().toISOString(), reason: verification.reason},
-              };
-            } catch (error) {
-              runtime = {
-                ...runtime,
-                phase: 'recovery-failed',
-                manualActionRequired: true,
-                recovery: {at: new Date().toISOString(), reason: `verified process could not be terminated: ${error.message}`},
-              };
-            }
-          } else if (verification.alive) {
-            runtime = {
-              ...runtime,
-              phase: 'orphaned-unverified',
-              manualActionRequired: true,
-              recovery: {at: new Date().toISOString(), reason: verification.reason},
-            };
-          } else {
-            runtime = {
-              ...runtime,
-              phase: 'exited',
-              manualActionRequired: false,
-              recovery: {at: new Date().toISOString(), reason: verification.reason},
-            };
+          const outcome = runtimeLifecycle.recover({task: t, runtime, identity: verification});
+          if (outcome.decision !== 'not-recoverable') {
+            runtime = outcome.runtime;
+            Object.assign(t, outcome.task);
+            try { atomicJson(path.join(directory(name), 'runtime.json'), runtime); } catch {}
           }
-          t.runtime = runtime;
-          if (t.workspaceLease) {
-            t.workspaceLease.status = runtime.manualActionRequired ? 'locked-unverified' : 'retained';
-          }
-          try { atomicJson(path.join(directory(name), 'runtime.json'), runtime); } catch {}
+        } else {
+          t.status = 'failed';
+          t.error = 'Manager restarted; the old runtime is no longer reusable, so inspect the workspace and create a new task for follow-up work';
         }
-        t.status = 'failed';
-        t.error = t.runtime?.manualActionRequired
-          ? `Manager restarted with an unverified residual runtime (PID ${t.runtime.pid}); workspace lock retained for manual resolution`
-          : 'Manager restarted; the old runtime is no longer reusable, so inspect the workspace and create a new task for follow-up work';
       }
       save(t);
       acceptance.restoreGrant(t.id);
@@ -837,6 +806,9 @@ export function createManager(options = {}) {
     ackTimeout: ({task, rec, roundId, timeoutMs}) => settleAckTimeout(task, rec, roundId, timeoutMs),
     roundTimeout: ({rec, timeoutMs}) => stopAfterRoundTimeout(rec, timeoutMs),
   });
+  const runtimeLifecycle = new RuntimeLifecycle({
+    terminate: record => terminateVerifiedRuntime(record),
+  });
   /**
    * Liveness facade. A live handle keeps the workspace locked, so every caller
    * that used to read the raw handles map still reads the same truth here.
@@ -870,6 +842,7 @@ export function createManager(options = {}) {
         rec.w.kill('SIGKILL');
       }
     },
+    runtimeLifecycle,
   });
   /** Persist a terminal result or error, applying first-round Provider fallback. */
   function settleTerminal(task, rec, message) {

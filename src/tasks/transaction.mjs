@@ -24,6 +24,7 @@ export class TaskTransaction {
     forceExitTimeoutMs,
     terminate = null,
     untrusted = () => {},
+    runtimeLifecycle = null,
   } = {}) {
     if (!runtime) throw new Error('runtime dependency is required');
     if (!repository) throw new Error('repository dependency is required');
@@ -39,6 +40,7 @@ export class TaskTransaction {
     this.forceExitTimeoutMs = forceExitTimeoutMs;
     this.terminate = terminate;
     this.onUntrusted = untrusted;
+    this.runtimeLifecycle = runtimeLifecycle;
   }
 
   /**
@@ -112,16 +114,29 @@ export class TaskTransaction {
       if (!graceful) {
         await this.forceExit(taskId, rec);
         const gone = await this.runtime.waitForExit(taskId, this.forceExitTimeoutMs);
-        if (!gone) throw new Error(`Task ${taskId}: could not confirm worker exit; data and workspace lock retained`);
+        if (!gone) {
+          const outcome = this.runtimeLifecycle?.exit({
+            task: this.repository.peek(taskId) ?? stopping,
+            exitConfirmed: false,
+          });
+          throw new Error(outcome?.error
+            ?? `Task ${taskId}: could not confirm worker exit; data and workspace lock retained`);
+        }
       }
 
       const closeError = this.runtime.closeError(taskId);
+      const outcome = this.runtimeLifecycle?.exit({
+        task: this.repository.peek(taskId) ?? stopping,
+        exitConfirmed: true,
+        closeError,
+      });
+      if (outcome?.releaseHandle === false) throw new Error(outcome.error);
       const forgotten = this.runtime.forget(taskId);
       if (!forgotten && this.runtime.has(taskId)) {
         throw new Error(`Task ${taskId}: worker exit could not be confirmed; data and workspace lock retained`);
       }
       if (closeError) {
-        const failed = {
+        const failed = outcome?.task ?? {
           ...stopping,
           status: 'failed',
           error: `Task ${taskId} runtime cleanup failed: ${closeError}`,

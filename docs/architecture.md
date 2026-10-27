@@ -22,6 +22,7 @@ interface.
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
 | `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff |
+| `src/runtime/lifecycle.mjs` | Restart recovery projection: verified termination, manual retention, confirmed exit |
 | `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
