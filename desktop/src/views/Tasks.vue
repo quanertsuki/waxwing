@@ -63,8 +63,10 @@ import CreateTask from '../components/CreateTask.vue';
 
 interface TaskUsage {
     requests: number;
+    outputTokens?: number;
     estimatedCostCny: number | null;
     costComplete: boolean;
+    warnings?: string[];
 }
 
 interface Task {
@@ -82,6 +84,7 @@ interface Task {
     usage?: TaskUsage;
     workspaceMode?: string;
     workspaceLabel?: string;
+    cleanupAuthorized?: boolean;
     runtimeHealth?: string;
     createdAt?: string;
     updatedAt?: string;

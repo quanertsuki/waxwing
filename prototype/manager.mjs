@@ -27,7 +27,12 @@ import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
 import {TaskRepository} from '../src/tasks/repository.mjs';
 import {TaskTransaction} from '../src/tasks/transaction.mjs';
 import {ChangeNotifier} from '../src/tasks/change-notifier.mjs';
-import {taskListView, taskSummaryView, workspaceLabel} from '../src/tasks/view.mjs';
+import {
+  normalizeTaskDetail,
+  taskListView,
+  taskSummaryView,
+  workspaceLabel,
+} from '../src/tasks/view.mjs';
 import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
 import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
@@ -486,6 +491,7 @@ export function createManager(options = {}) {
       usage,
       runtimeHealth: t.runtimeHealth ?? t.runtime?.health ?? 'unknown',
       effort: effectiveEffort(t),
+      workspaceMode: t.workspaceLease?.mode ?? 'legacy',
       error: t.error ? error.text : null,
     });
     item.maxTokens = effectiveMaxTokens(t);
@@ -494,8 +500,8 @@ export function createManager(options = {}) {
     if (t.error && error.truncated) item.errorTruncated = true;
     if (withPaths) {
       const sourceWorkspace = t.sourceWorkspace ?? t.workspaceLease?.sourceWorkspace ?? t.workspace;
-      item.workspaceMode = t.workspaceLease?.mode ?? 'legacy';
-      item.workspaceLabel = workspaceLabel(item.workspaceMode);
+      item.workspaceMode = item.workspaceMode ?? t.workspaceLease?.mode ?? 'legacy';
+      item.workspaceLabel = item.workspaceLabel ?? workspaceLabel(item.workspaceMode);
       if (canonicalPath(sourceWorkspace) !== canonicalPath(t.workspace)) item.sourceWorkspace = sourceWorkspace;
       item.branch = t.workspaceLease?.branch ?? null;
       item.baseCommit = t.workspaceLease?.baseCommit ?? null;
@@ -532,7 +538,7 @@ export function createManager(options = {}) {
       statusUsage.warnings = [...new Set([...(statusUsage.warnings ?? []), last.policy.warning])];
     }
     const reworkBlocked = reworkBlockedReason(t, statusUsage);
-    return taskSummaryView(t, {
+    const summary = taskSummaryView(t, {
       listView: base,
       usageRounds: snapshot.usageRounds,
       statusUsage,
@@ -545,6 +551,7 @@ export function createManager(options = {}) {
       report: base.report,
       error: base.error,
     });
+    return normalizeTaskDetail(t, summary);
   }
   /** Hold one HTTP/MCP call until the task stops running or the wait expires. */
   async function waitForTask(a) {

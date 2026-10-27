@@ -51,7 +51,7 @@
             <div><strong>{{ detail.usage.inputTokens ?? 0 }}</strong><span>输入 tokens</span></div>
             <div><strong>{{ detail.usage.outputTokens ?? 0 }}</strong><span>输出 tokens</span></div>
             <div>
-              <strong>{{ detail.usage.estimatedCostCny === null ? '—' : `¥${detail.usage.estimatedCostCny.toFixed(4)}` }}</strong>
+              <strong>{{ detail.usage.estimatedCostCny == null ? '—' : `¥${detail.usage.estimatedCostCny.toFixed(4)}` }}</strong>
               <span>估算费用</span>
             </div>
           </div>
@@ -144,10 +144,13 @@ interface TaskDetail {
   reworkBlockedReason?: string;
   lastRound?: { roundId?: string };
   usage?: {
-    requests: number;
-    inputTokens: number;
-    outputTokens: number;
-    estimatedCostCny: number | null;
+    available?: boolean;
+    requests?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    estimatedCostCny?: number | null;
+    costComplete?: boolean;
+    warnings?: string[];
   };
 }
 
