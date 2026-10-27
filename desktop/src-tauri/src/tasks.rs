@@ -9,7 +9,9 @@ use std::process::Stdio;
 #[serde(rename_all = "camelCase")]
 pub struct TaskUsage {
     pub requests: usize,
+    #[serde(default)]
     pub estimated_cost_cny: Option<f64>,
+    #[serde(default)]
     pub cost_complete: bool,
 }
 
@@ -18,25 +20,153 @@ pub struct TaskUsage {
 pub struct Task {
     pub id: String,
     pub status: String,
+    #[serde(default)]
     pub status_label: Option<String>,
     pub round_count: usize,
+    #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     pub workspace: String,
+    #[serde(default)]
     pub source_workspace: Option<String>,
+    #[serde(default)]
     pub workspace_mode: Option<String>,
+    #[serde(default)]
     pub workspace_label: Option<String>,
+    #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default)]
     pub base_commit: Option<String>,
+    #[serde(default)]
     pub runtime_health: Option<String>,
+    #[serde(default)]
     pub cleanup_authorized: Option<bool>,
     pub summary: String,
     pub live: bool,
     pub accepted: bool,
+    #[serde(default)]
     pub max_tokens: Option<u64>,
+    #[serde(default)]
     pub usage: Option<TaskUsage>,
+    #[serde(default)]
     pub created_at: Option<String>,
+    #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRound {
+    pub number: u32,
+    #[serde(default)]
+    pub round_id: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRuntime {
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub manual_action_required: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetailUsage {
+    #[serde(default)]
+    pub available: Option<bool>,
+    #[serde(default)]
+    pub requests: Option<usize>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub estimated_cost_cny: Option<f64>,
+    #[serde(default)]
+    pub cost_complete: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    pub id: String,
+    pub status: String,
+    #[serde(default)]
+    pub status_label: Option<String>,
+    #[serde(default)]
+    pub round_count: usize,
+    #[serde(default)]
+    pub round_id: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub workspace: String,
+    #[serde(default)]
+    pub source_workspace: Option<String>,
+    #[serde(default)]
+    pub workspace_mode: Option<String>,
+    #[serde(default)]
+    pub workspace_label: Option<String>,
+    #[serde(default)]
+    pub worktree_status: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    #[serde(default)]
+    pub live: bool,
+    #[serde(default)]
+    pub accepted: bool,
+    #[serde(default)]
+    pub can_rework: Option<bool>,
+    #[serde(default)]
+    pub manual_action_required: Option<bool>,
+    #[serde(default)]
+    pub runtime_health: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<TaskRuntime>,
+    #[serde(default)]
+    pub rework_blocked_reason: Option<String>,
+    #[serde(default)]
+    pub last_round: Option<TaskRound>,
+    #[serde(default)]
+    pub usage: Option<TaskDetailUsage>,
+    #[serde(default)]
+    pub usage_rounds: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub result_preview: Option<String>,
+    #[serde(default)]
+    pub result_finish_reason: Option<String>,
+    #[serde(default)]
+    pub event_count: Option<u64>,
+    #[serde(default)]
+    pub runtime_ready: Option<bool>,
+    #[serde(default)]
+    pub accepted_at: Option<String>,
+    #[serde(default)]
+    pub data_directory: Option<String>,
+    #[serde(default)]
+    pub report: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub cleanup_authorized: Option<bool>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
 }
 
 fn read_server_token() -> Result<String, String> {
@@ -93,8 +223,9 @@ pub async fn get_tasks() -> Result<Vec<Task>, String> {
 }
 
 #[tauri::command]
-pub async fn get_task_detail(id: String) -> Result<serde_json::Value, String> {
-    manager_request("status", serde_json::json!({"id": id})).await
+pub async fn get_task_detail(id: String) -> Result<TaskDetail, String> {
+    let result = manager_request("status", serde_json::json!({"id": id})).await?;
+    serde_json::from_value(result).map_err(|e| format!("Failed to parse task detail: {}", e))
 }
 
 #[tauri::command]
@@ -286,5 +417,74 @@ mod tests {
         assert_eq!(task.workspace_label.as_deref(), Some("独立 Worktree"));
         assert_eq!(task.cleanup_authorized, Some(true));
         assert_eq!(task.round_count, 2);
+    }
+
+    #[test]
+    fn task_detail_accepts_the_bounded_shared_contract() {
+        let detail: TaskDetail = serde_json::from_value(serde_json::json!({
+            "id": "task-0123456789ab",
+            "status": "awaiting_review",
+            "statusLabel": "待验收",
+            "roundCount": 1,
+            "roundId": "round-1",
+            "workspace": "C:/work/task",
+            "workspaceMode": "worktree",
+            "workspaceLabel": "独立 Worktree",
+            "worktreeStatus": "active",
+            "live": true,
+            "accepted": false,
+            "canRework": true,
+            "manualActionRequired": true,
+            "runtimeHealth": "unhealthy",
+            "runtime": {"pid": 4242, "manualActionRequired": true},
+            "lastRound": {
+                "number": 1,
+                "roundId": "round-1",
+                "maxTokens": 4096
+            },
+            "usage": {
+                "available": true,
+                "requests": 2,
+                "inputTokens": 10,
+                "outputTokens": 20,
+                "estimatedCostCny": 0.25,
+                "costComplete": true
+            },
+            "usageRounds": [{"number": 1, "requests": 2}]
+        }))
+        .expect("bounded task detail must deserialize");
+
+        assert_eq!(detail.status_label.as_deref(), Some("待验收"));
+        assert_eq!(detail.workspace_label.as_deref(), Some("独立 Worktree"));
+        assert_eq!(
+            detail.runtime.as_ref().and_then(|runtime| runtime.pid),
+            Some(4242)
+        );
+        assert_eq!(
+            detail.last_round.as_ref().map(|round| round.number),
+            Some(1)
+        );
+        assert_eq!(
+            detail.usage.as_ref().and_then(|usage| usage.requests),
+            Some(2)
+        );
+        assert_eq!(detail.usage_rounds.len(), 1);
+    }
+
+    #[test]
+    fn task_detail_accepts_an_old_minimal_response() {
+        let detail: TaskDetail = serde_json::from_value(serde_json::json!({
+            "id": "task-0123456789ab",
+            "status": "closed",
+            "workspace": "C:/work/task"
+        }))
+        .expect("old minimal status response must remain readable");
+
+        assert_eq!(detail.id, "task-0123456789ab");
+        assert_eq!(detail.round_count, 0);
+        assert_eq!(detail.live, false);
+        assert!(detail.runtime.is_none());
+        assert!(detail.usage.is_none());
+        assert!(detail.usage_rounds.is_empty());
     }
 }

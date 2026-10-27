@@ -33,6 +33,7 @@ export function taskListView(task, {
   usage,
   runtimeHealth,
   effort,
+  workspaceMode,
   error = task.error ?? null,
 }) {
   const item = {
@@ -42,6 +43,8 @@ export function taskListView(task, {
     roundCount: task.rounds.length,
     live: task.live,
     workspace: task.workspace,
+    workspaceMode,
+    ...(workspaceMode ? {workspaceLabel: workspaceLabel(workspaceMode)} : {}),
     maxTokens: task.maxTokens,
     accepted: Boolean(task.acceptance),
     cleanupAuthorized: task.cleanupAuthorized,
@@ -87,7 +90,8 @@ export function taskSummaryView(task, {
   return {
     ...listView,
     statusLabel: statusLabel(task.status),
-    workspaceMode,
+    workspaceMode: workspaceMode ?? listView.workspaceMode ?? null,
+    workspaceLabel: workspaceLabel(workspaceMode ?? listView.workspaceMode ?? 'legacy'),
     ...(sourceWorkspace ? {sourceWorkspace} : {}),
     branch: task.workspaceLease?.branch ?? null,
     baseCommit: task.workspaceLease?.baseCommit ?? null,
@@ -130,3 +134,113 @@ function usageRoundsForSummary(usage) {
 export function taskPageView(id, view, page, extra = {}) {
   return {id, view, ...extra, ...page};
 }
+
+/**
+ * Stable high-level detail contract. The manager supplies the bounded payload
+ * and the adapter only adds presentation-neutral, shared fields.
+ */
+export function taskDetailView(summary, extra = {}) {
+  return {...summary, ...extra};
+}
+
+/**
+ * Fill nullable detail fields so Rust/Vue receive one stable shape.
+ * Detail is a control/status response, not a history export, so optional
+ * absent fields are omitted rather than filled with dozens of nulls.
+ */
+export function normalizeTaskDetail(task, summary) {
+  // Keep the manager's bounded projection authoritative. Spreading the full
+  // task record here would leak rounds, prompts, and results into the default
+  // status response, bypassing the paginated history/result views.
+  const normalized = {
+    ...summary,
+    runtimeHealth: summary.runtimeHealth ?? 'unknown',
+    cleanupAuthorized: Boolean(summary.cleanupAuthorized),
+    manualActionRequired: Boolean(summary.manualActionRequired),
+    canRework: Boolean(summary.canRework),
+    runtimeReady: Boolean(summary.runtimeReady),
+    resultPreviewComplete: Boolean(summary.resultPreviewComplete),
+    resultPreviewTruncated: Boolean(summary.resultPreviewTruncated),
+    usageRounds: Array.isArray(summary.usageRounds) ? summary.usageRounds : [],
+  };
+  if (summary.lastRound) {
+    normalized.lastRound = {
+      number: summary.lastRound.number,
+      ...(summary.lastRound.roundId ? {roundId: summary.lastRound.roundId} : {}),
+      ...(summary.lastRound.effort ? {effort: summary.lastRound.effort} : {}),
+    };
+  }
+  if (task.runtime?.pid !== null && task.runtime?.pid !== undefined) {
+    normalized.runtime = {
+      pid: task.runtime.pid,
+      manualActionRequired: Boolean(task.runtime.manualActionRequired),
+    };
+  }
+  return normalized;
+}
+
+/**
+ * One compatibility contract for fields that every list/detail adapter must
+ * be able to read. Required fields are present in both shapes; nullable fields
+ * may be null but must not be omitted when the source view is a task.
+ */
+export const TASK_LIST_FIELDS = Object.freeze([
+  'id',
+  'status',
+  'statusLabel',
+  'roundCount',
+  'live',
+  'workspace',
+  'workspaceMode',
+  'workspaceLabel',
+  'maxTokens',
+  'accepted',
+  'cleanupAuthorized',
+  'provider',
+  'model',
+  'error',
+  'runtimeHealth',
+  'createdAt',
+  'updatedAt',
+  'usage',
+]);
+
+export const TASK_DETAIL_FIELDS = Object.freeze([
+  ...TASK_LIST_FIELDS,
+  'sourceWorkspace',
+  'branch',
+  'baseCommit',
+  'worktreeStatus',
+  'roundId',
+  'manualActionRequired',
+  'runtime',
+  'lastRound',
+  'dataDirectory',
+  'report',
+  'canRework',
+  'reworkBlockedReason',
+  'runtimeReady',
+  'acceptedAt',
+  'resultPreview',
+  'resultPreviewChars',
+  'resultTotalChars',
+  'resultPreviewComplete',
+  'resultPreviewTruncated',
+  'resultFinishReason',
+  'usageRounds',
+]);
+
+const TASK_DETAIL_OPTIONAL_FIELDS = Object.freeze([
+  'sourceWorkspace',
+  'branch',
+  'baseCommit',
+  'worktreeStatus',
+  'roundId',
+  'dataDirectory',
+  'report',
+  'reworkBlockedReason',
+  'acceptedAt',
+  'resultPreview',
+  'resultFinishReason',
+  'usage',
+]);

@@ -5,6 +5,7 @@ export {TaskLifecycle} from './tasks/lifecycle.mjs';
 export {TaskTransaction} from './tasks/transaction.mjs';
 export {
   statusLabel,
+  normalizeTaskDetail,
   taskListView,
   taskPageView,
   taskSummaryView,
