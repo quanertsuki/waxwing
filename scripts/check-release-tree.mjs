@@ -48,6 +48,7 @@ export const required = [
   'src/research/service.mjs',
   'src/research/state.mjs',
   'src/runtime/module.mjs',
+  'src/runtime/lifecycle.mjs',
   'src/runtime/protocol.mjs',
   'src/runtime/supervisor.mjs',
   'src/tasks/change-notifier.mjs',

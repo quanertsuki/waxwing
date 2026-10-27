@@ -12,6 +12,7 @@ export {
 } from './tasks/view.mjs';
 export {WorkspaceLeaseManager} from './workspace/lease-manager.mjs';
 export {Runtime, roundTimeouts} from './runtime/module.mjs';
+export {RuntimeLifecycle} from './runtime/lifecycle.mjs';
 export {RuntimeSupervisor} from './runtime/supervisor.mjs';
 export {UsageService} from './usage/service.mjs';
 export {
