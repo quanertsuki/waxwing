@@ -1156,15 +1156,17 @@ export function createManager(options = {}) {
         // Lifecycle first, then evidence: an illegal status must still report
         // "Cannot accept task in ..." exactly as before.
         const t = transition(get(a.id), 'accept');
-        const accepted = acceptance.accept(t, {evidence: a.evidence, policySection: policyReportSection(t)});
-        event(accepted.task, {kind: 'accepted', evidence: a.evidence});
-        return statusSummary(save(accepted.task));
+        const accepted = acceptance.acceptAndSave(t, {
+          evidence: a.evidence,
+          policySection: policyReportSection(t),
+          save,
+        });
+        event(accepted, {kind: 'accepted', evidence: a.evidence});
+        return statusSummary(accepted);
       }
       case 'export': {
         const t = get(a.id);
-        const exported = acceptance.exportReport(t, {policySection: policyReportSection(t)});
-        save(exported.task);
-        return {file: exported.file, hash: exported.hash};
+        return acceptance.exportAndSave(t, {policySection: policyReportSection(t), save});
       }
       case 'preview_delete': return deletionPreview(get(a.id));
       case 'grant_delete': {
@@ -1183,10 +1185,14 @@ export function createManager(options = {}) {
         // Preview, archived-report hash, grant scope, and fingerprint equality
         // are one decision inside the module; the manager only reaps records.
         const t = get(a.id);
-        const deleted = acceptance.removeTask(t, {directory: directory(t.id), live: workers.has(t.id)});
-        repository.delete(a.id);
-        eventSequences.delete(a.id);
-        return deleted;
+        return acceptance.removeTaskAndForget(t, {
+          directory: directory(t.id),
+          live: workers.has(t.id),
+          forget: id => {
+            repository.delete(id);
+            eventSequences.delete(id);
+          },
+        });
       }
       default: throw new Error(`Unknown action: ${name}`);
     }

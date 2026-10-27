@@ -36,6 +36,7 @@ await import('./runtime-module.test.mjs');
 await import('./runtime-protocol.test.mjs');
 await import('./runtime-identity.test.mjs');
 await import('./runtime-lifecycle.test.mjs');
+await import('./acceptance-module.test.mjs');
 await import('./release-tree.test.mjs');
 await import('./task-lifecycle.test.mjs');
 await import('./task-transaction.test.mjs');
