@@ -7,7 +7,7 @@ import {randomUUID, createHash} from 'node:crypto';
 import {fork, spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnvironment,
-  canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath,pathsOverlap} from './common.mjs';
+  canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath} from './common.mjs';
 import {transition} from '../src/tasks/lifecycle.mjs';
 import {budgetFileFor, parseOptionalMaxTokens, resolveRoundBudget} from './budget.mjs';
 import {DEFAULT_EFFORT, parseOptionalEffort, resolveRoundEffort} from './effort.mjs';
@@ -294,13 +294,10 @@ export function createManager(options = {}) {
    * occupies it too until that runtime is closed.
    */
   function workspaceConflict(workspace, excludeId) {
-    for (const x of repository.values()) {
-      if (x.id === excludeId || typeof x.workspace !== 'string') continue;
-      if (x.status !== 'running' && x.status !== 'stopping' && !workers.has(x.id) &&
-          !x.runtime?.manualActionRequired) continue;
-      if (pathsOverlap(workspace, x.workspace)) return x;
-    }
-    return null;
+    return workspaceLeases.conflictFor(workspace, [...repository.values()], {
+      excludeId,
+      live: id => workers.has(id),
+    });
   }
   /**
    * Original rework refusals, checked before the cumulative usage limit. An

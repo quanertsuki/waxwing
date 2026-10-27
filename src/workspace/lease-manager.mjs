@@ -8,6 +8,7 @@ import {
   removeWorktree,
   rollbackWorktree,
 } from './git.mjs';
+import {pathsOverlap} from '../../prototype/common.mjs';
 
 const MODES = new Set(['auto', 'worktree', 'shared']);
 
@@ -27,6 +28,23 @@ export class WorkspaceLeaseManager {
     this.worktreeContainerName = options.worktreeContainerName
       ?? options.worktreeParentName
       ?? '.waxwing-worktrees';
+  }
+
+  /**
+   * Project the first task that still owns a workspace. The caller supplies
+   * current task snapshots plus a live predicate; this module owns the status,
+   * overlap, exclusion, and manual-runtime rules.
+   */
+  conflictFor(workspace, tasks = [], {excludeId = null, live = () => false} = {}) {
+    for (const task of tasks) {
+      if (!task || task.id === excludeId || typeof task.workspace !== 'string') continue;
+      const ownsRuntime = live(task.id) || task.runtime?.manualActionRequired === true;
+      if (task.status !== 'running' && task.status !== 'stopping' && !ownsRuntime) continue;
+      if (pathsOverlap(workspace, task.workspace)) {
+        return {...task, live: live(task.id)};
+      }
+    }
+    return null;
   }
 
   plan({workspace, mode = this.defaultMode, taskId}) {
