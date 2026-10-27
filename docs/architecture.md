@@ -16,6 +16,8 @@ interface.
 | `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases |
 | `src/tasks/repository.mjs` | Task index, record validation, atomic `task.json` persistence |
 | `src/tasks/lifecycle.mjs` | Legal task-status transitions |
+| `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation |
+| `src/tasks/view.mjs` | Stable read-only list/summary/page view contract for every adapter |
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
@@ -23,7 +25,9 @@ interface.
 | `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
+| `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification |
 | `src/research/service.mjs` | Parallel read-only research shards, scratch workspaces, partial results, aggregate reports |
+| `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
 | `src/usage/service.mjs` | Metrics facade; optional thresholds are disabled by default |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |

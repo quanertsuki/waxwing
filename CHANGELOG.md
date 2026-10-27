@@ -7,6 +7,12 @@ and uses semantic versioning for public releases.
 
 ### Added
 
+- Shared task lifecycle transactions, workspace-lease acquisition/release, and
+  a read-only task view contract used by the JavaScript, Rust, and Vue layers
+- One usage-policy module for limit inheritance, threshold evaluation, and
+  one-round override decisions
+- A research batch state module that keeps cancellation, partial evidence, and
+  runtime finalization decisions consistent
 - Server-side `wait` and `research_wait` actions, CLI commands, and
   `waxwing_wait` / `waxwing_research_wait` MCP tools
 - Parallel research batches with one scratch workspace per shard, automatic
@@ -31,6 +37,10 @@ and uses semantic versioning for public releases.
 
 ### Fixed
 
+- A failed worktree materialization now rolls back its lease before a task
+  record is created
+- The release-tree check requires every module exported by the public
+  composition root, including the task lifecycle module
 - The release-tree check includes non-ignored working files, skips deleted
   tracked files, and still fails when a required release file is absent
 

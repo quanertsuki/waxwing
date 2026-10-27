@@ -94,6 +94,33 @@ export class WorkspaceLeaseManager {
     };
   }
 
+  /**
+   * Plan and materialize one lease as a single transaction. The caller cannot
+   * accidentally create a worktree before checking occupancy, and any failure
+   * after creation is rolled back here rather than in the manager.
+   */
+  acquire({workspace, mode = this.defaultMode, taskId, conflictFor = () => null}, {deferRollback = false} = {}) {
+    const plan = this.plan({workspace, mode, taskId});
+    const conflict = conflictFor(plan.executionWorkspace)
+      ?? (plan.mode === 'worktree' ? conflictFor(plan.sourceWorkspace) : null);
+    if (conflict) {
+      const error = new Error(`Workspace is occupied by task ${conflict.id} (${conflict.status}${conflict.live ? ', runtime not exited' : ''}); close it before creating a new task`);
+      error.code = 'WORKSPACE_OCCUPIED';
+      error.conflict = conflict;
+      throw error;
+    }
+    let lease = null;
+    try {
+      lease = this.materialize(plan);
+      return {plan, lease};
+    } catch (error) {
+      if (!deferRollback) {
+        try { this.rollback(lease ?? plan.lease); } catch {}
+      }
+      throw error;
+    }
+  }
+
   materialize(plan) {
     if (plan.mode === 'shared') {
       return {
@@ -140,6 +167,17 @@ export class WorkspaceLeaseManager {
       branch: lease.branch,
       baseCommit: lease.baseCommit,
     };
+  }
+
+  /**
+   * Cleanup is a lifecycle operation, not just a Git command: only a closed
+   * task with a confirmed runtime exit may release its worktree, and a dirty
+   * worktree is always retained with its branch for manual review.
+   */
+  release({task, live = false}) {
+    if (task?.status !== 'closed') throw new Error('Close the task before cleaning its worktree');
+    if (live) throw new Error('Runtime exit is not confirmed; worktree retained');
+    return this.cleanup(task.workspaceLease);
   }
 
   inspect(lease, taskWorkspace) {

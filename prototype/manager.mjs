@@ -12,11 +12,21 @@ import {transition} from '../src/tasks/lifecycle.mjs';
 import {budgetFileFor, parseOptionalMaxTokens, resolveRoundBudget} from './budget.mjs';
 import {DEFAULT_EFFORT, parseOptionalEffort, resolveRoundEffort} from './effort.mjs';
 import {usageForTask,usageForList,usageForView} from '../src/usage/service.mjs';
+import {
+  blockReason as usageLimitBlockReason,
+  decideRework,
+  effectiveLimits,
+  mergeLimits,
+  overrideEvent,
+  parseOverride,
+} from '../src/usage/policy.mjs';
 import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
 import {TaskRepository} from '../src/tasks/repository.mjs';
+import {TaskTransaction} from '../src/tasks/transaction.mjs';
 import {ChangeNotifier} from '../src/tasks/change-notifier.mjs';
+import {taskListView, taskSummaryView, workspaceLabel} from '../src/tasks/view.mjs';
 import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
 import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
@@ -35,11 +45,7 @@ const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
 const ACTIVE_TASK = new Set(['created', 'running', 'stopping']);
 const STATUS_VIEWS = ['summary', 'result', 'history', 'usage', 'report', 'workspace', 'diff', 'log'];
-const USAGE_LIMIT_FIELDS = ['enabled', 'warnCostCny', 'blockCostCny', 'warnRequests', 'blockRequests'];
-const COST_LIMIT_FIELDS = ['warnCostCny', 'blockCostCny'];
-const REQUEST_LIMIT_FIELDS = ['warnRequests', 'blockRequests'];
 const DEFAULT_POLICY_FILE = 'execution-policy.md';
-const OVERRIDE_REASON_LIMIT = 1000;
 const isHighSurrogate = c => c >= 0xd800 && c <= 0xdbff;
 const isLowSurrogate = c => c >= 0xdc00 && c <= 0xdfff;
 
@@ -53,89 +59,12 @@ function digestText(text) {
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
-/**
- * Validate a whole or partial limit object. The same function protects create,
- * rework, and direct HTTP calls, so the MCP schema is not the only guard.
- */
-function validateLimitObject(value, label = 'usageLimits') {
-  if (!isPlainObject(value)) throw new Error(`${label} must be an object`);
-  for (const key of Object.keys(value)) {
-    if (!USAGE_LIMIT_FIELDS.includes(key)) throw new Error(`${label}.${key} is not a supported field`);
-  }
-  if ('enabled' in value && typeof value.enabled !== 'boolean') {
-    throw new Error(`${label}.enabled must be a boolean`);
-  }
-  for (const key of COST_LIMIT_FIELDS) {
-    if (!(key in value)) continue;
-    if (typeof value[key] !== 'number' || !Number.isFinite(value[key]) || value[key] <= 0) {
-      throw new Error(`${label}.${key} must be a positive finite number`);
-    }
-  }
-  for (const key of REQUEST_LIMIT_FIELDS) {
-    if (!(key in value)) continue;
-    if (typeof value[key] !== 'number' || !Number.isSafeInteger(value[key]) || value[key] <= 0) {
-      throw new Error(`${label}.${key} must be a positive safe integer`);
-    }
-  }
-  return value;
-}
-/** Validate and copy a complete resolved limit set, including warn < block. */
-function resolvedLimitObject(value, label = 'usageLimits') {
-  validateLimitObject(value, label);
-  for (const key of ['enabled', ...COST_LIMIT_FIELDS, ...REQUEST_LIMIT_FIELDS]) {
-    if (!(key in value)) throw new Error(`${label}.${key} is required`);
-  }
-  const result = {
-    enabled: value.enabled,
-    warnCostCny: value.warnCostCny,
-    blockCostCny: value.blockCostCny,
-    warnRequests: value.warnRequests,
-    blockRequests: value.blockRequests,
-  };
-  if (!(result.warnCostCny < result.blockCostCny)) {
-    throw new Error(`${label}.warnCostCny must be less than blockCostCny`);
-  }
-  if (!(result.warnRequests < result.blockRequests)) {
-    throw new Error(`${label}.warnRequests must be less than blockRequests`);
-  }
-  return result;
-}
 /** Resolve optional per-call limits over a complete base set. */
 function resolveLimitOverride(value, base) {
-  if (value === undefined) return null;
-  validateLimitObject(value);
-  return resolvedLimitObject({...base, ...value});
+  return mergeLimits(value, base);
 }
 function effectiveUsageLimits(t) {
-  const raw = isPlainObject(t?.usageLimits) ? {...config.usageLimits, ...t.usageLimits} : config.usageLimits;
-  return resolvedLimitObject(raw, 'usageLimits');
-}
-function parseOverrideOptions(args) {
-  if (args.overrideLimits !== undefined && typeof args.overrideLimits !== 'boolean') {
-    throw new Error('overrideLimits must be a boolean');
-  }
-  if (args.overrideReason !== undefined && typeof args.overrideReason !== 'string') {
-    throw new Error('overrideReason must be a string');
-  }
-  if (typeof args.overrideReason === 'string' && args.overrideReason.length > OVERRIDE_REASON_LIMIT) {
-    throw new Error(`overrideReason must be at most ${OVERRIDE_REASON_LIMIT} characters`);
-  }
-  const enabled = args.overrideLimits === true;
-  if (enabled && !(typeof args.overrideReason === 'string' && args.overrideReason.trim())) {
-    throw new Error('overrideLimits requires a nonempty overrideReason');
-  }
-  return {enabled, reason: typeof args.overrideReason === 'string' ? args.overrideReason : null};
-}
-function usageLimitBlockReason(usage) {
-  const parts = [];
-  if (usage.internalRequests >= usage.limits.blockRequests) {
-    parts.push(`${usage.internalRequests} internal requests >= blockRequests ${usage.limits.blockRequests}`);
-  }
-  if (usage.costLimitReliable && typeof usage.estimatedCostCny === 'number' &&
-      usage.estimatedCostCny >= usage.limits.blockCostCny) {
-    parts.push(`estimated cost ${usage.estimatedCostCny} CNY >= blockCostCny ${usage.limits.blockCostCny}`);
-  }
-  return `Cumulative usage limit reached (${parts.join('; ')}); rework requires overrideLimits:true with a nonempty overrideReason`;
+  return effectiveLimits(t?.usageLimits, config.usageLimits);
 }
 function policyConfiguration() {
   const value = config.executionPolicy;
@@ -468,8 +397,8 @@ export function createManager(options = {}) {
     const prompt = validatePrompt(a.prompt);
     // Validate limits before workspace resolution, task creation, or any write.
     const usageLimits = a.usageLimits === undefined
-      ? resolvedLimitObject(config.usageLimits)
-      : resolveLimitOverride(a.usageLimits, resolvedLimitObject(config.usageLimits));
+      ? effectiveLimits(undefined, config.usageLimits)
+      : resolveLimitOverride(a.usageLimits, effectiveLimits(undefined, config.usageLimits));
     const requested = parseOptionalMaxTokens(a.maxTokens);
     const requestedEffort = parseOptionalEffort(a.effort);
     // Resolve provider: explicit name > defaultProvider > configured fallback.
@@ -501,11 +430,6 @@ export function createManager(options = {}) {
       mode: requestedMode,
       taskId,
     });
-    const conflict = workspaceConflict(workspacePlan.executionWorkspace) ??
-      (workspacePlan.mode === 'worktree' ? workspaceConflict(workspacePlan.sourceWorkspace) : null);
-    if (conflict) {
-      throw new Error(`Workspace is occupied by task ${conflict.id} (${conflict.status}${workers.has(conflict.id) ? ', runtime not exited' : ''}); close it before creating a new task`);
-    }
     return {
       prompt,
       workspace,
@@ -559,40 +483,21 @@ export function createManager(options = {}) {
       try { usage = usageForList(t, directory(t.id)); }
       catch (e) { usage = {available: false, error: oneLine(e.message).slice(0, 240)}; }
     }
-    const item = {
-      id: t.id,
-      status: t.status,
-      roundCount: t.rounds.length,
-      live: workers.has(t.id),
-      workspace: t.workspace,
-      maxTokens: effectiveMaxTokens(t),
-      accepted: Boolean(t.acceptance),
-      cleanupAuthorized: acceptance.hasGrant(t.id),
-      provider: t.provider?.name,
-      model: t.model,
-      error: t.error ? error.text : null,
-      runtimeHealth: t.runtimeHealth ?? t.runtime?.health ?? 'unknown',
-      createdAt: t.createdAt,
-      updatedAt: t.updatedAt,
+    const item = taskListView(t, {
+      summary: withPaths ? null : summary,
       usage,
-    };
-    if (t.kind === 'research') {
-      item.kind = 'research';
-      item.batchId = t.batchId ?? null;
-      item.shardId = t.shardId ?? null;
-    }
-    // Status has a bounded result preview; only list needs the prompt summary.
-    // Keeping it out of status avoids duplicating similar text in mutation
-    // responses and keeps those payloads below the communication size target.
-    if (!withPaths) item.summary = summary.text;
-    const effort = effectiveEffort(t);
-    if (effort) item.effort = effort;
-    if (summary.truncated) item.summaryTruncated = true;
+      runtimeHealth: t.runtimeHealth ?? t.runtime?.health ?? 'unknown',
+      effort: effectiveEffort(t),
+      error: t.error ? error.text : null,
+    });
+    item.maxTokens = effectiveMaxTokens(t);
+    item.cleanupAuthorized = acceptance.hasGrant(t.id);
+    item.live = workers.has(t.id);
     if (t.error && error.truncated) item.errorTruncated = true;
-    if (last) item.lastRound = last.number;
     if (withPaths) {
       const sourceWorkspace = t.sourceWorkspace ?? t.workspaceLease?.sourceWorkspace ?? t.workspace;
       item.workspaceMode = t.workspaceLease?.mode ?? 'legacy';
+      item.workspaceLabel = workspaceLabel(item.workspaceMode);
       if (canonicalPath(sourceWorkspace) !== canonicalPath(t.workspace)) item.sourceWorkspace = sourceWorkspace;
       item.branch = t.workspaceLease?.branch ?? null;
       item.baseCommit = t.workspaceLease?.baseCommit ?? null;
@@ -629,28 +534,19 @@ export function createManager(options = {}) {
       statusUsage.warnings = [...new Set([...(statusUsage.warnings ?? []), last.policy.warning])];
     }
     const reworkBlocked = reworkBlockedReason(t, statusUsage);
-    return {
-      ...base,
-      canRework: reworkBlocked === null,
-      reworkBlockedReason: reworkBlocked,
-      lastEvent: t.lastEvent ?? null,
-      eventCount: t.eventCount ?? 0,
-      runtimeReady: Boolean(t.runtimeReady),
-      acceptedAt: t.acceptance?.at ?? null,
+    return taskSummaryView(t, {
+      listView: base,
+      usageRounds: snapshot.usageRounds,
+      statusUsage,
       resultPreview: preview.text,
-      resultPreviewChars: preview.text.length,
       resultTotalChars: resultText.length,
-      resultPreviewComplete: !preview.truncated,
-      resultPreviewTruncated: preview.truncated,
-      resultFinishReason: last?.result?.finishReason ?? null,
-      lastRound: last ? {number: last.number, roundId: last.roundId ?? null, startedAt: last.startedAt ?? null,
-        finishedAt: last.finishedAt ?? null, maxTokens: last.maxTokens ?? null,
-        ...(last.effort ? {effort: last.effort} : {})} : null,
-      usage: statusUsage,
-      // The default summary keeps only rounds that actually recorded usage;
-      // view=usage still exposes every event-only or empty round.
-      usageRounds: snapshot.usageRounds.filter(round => round.requests > 0),
-    };
+      reworkBlockedReason: reworkBlocked,
+      workspaceMode: base.workspaceMode,
+      sourceWorkspace: base.sourceWorkspace,
+      dataDirectory: base.dataDirectory,
+      report: base.report,
+      error: base.error,
+    });
   }
   /** Hold one HTTP/MCP call until the task stops running or the wait expires. */
   async function waitForTask(a) {
@@ -950,6 +846,31 @@ export function createManager(options = {}) {
     get: id => runtime.get(id),
     keys: () => runtime.ids(),
   };
+  const tasks = new TaskTransaction({
+    runtime,
+    repository,
+    save,
+    event: (task, payload) => event(task, payload),
+    workspace: workspaceLeases,
+    acceptance: {
+      revoke: task => acceptance.revoke(task),
+      report: task => acceptance.exportReport(task, {policySection: policyReportSection(task)}),
+    },
+    gracefulExitTimeoutMs: DEFAULT_EXIT_TIMEOUT_MS,
+    forceExitTimeoutMs: FORCE_EXIT_TIMEOUT_MS,
+    untrusted: (id, detail) => markUntrusted(id, detail),
+    terminate: async ({rec}) => {
+      if (process.platform === 'win32') {
+        const kill = spawn('taskkill', ['/PID', String(rec.w.pid), '/T', '/F'], {
+          windowsHide: true,
+          stdio: 'ignore',
+        });
+        await once(kill, 'exit');
+      } else {
+        rec.w.kill('SIGKILL');
+      }
+    },
+  });
   /** Persist a terminal result or error, applying first-round Provider fallback. */
   function settleTerminal(task, rec, message) {
     const ok = message.kind === 'result' && message.finishReason === 'completed';
@@ -1069,16 +990,13 @@ export function createManager(options = {}) {
     const policy = policyForRound();
     const effectivePrompt = policy.meta.applied ? `${userPrompt}\n---\n${policy.text}` : userPrompt;
     const roundId = runtime.createRoundId();
-    const next = transition(current, 'run');
-    // A new attempt first revokes the old acceptance, its report hash, and
-    // any cleanup grant; the module owns all three.
-    const revoked = acceptance.revoke(next);
-    next.acceptance = revoked.acceptance;
-    next.reportHash = revoked.reportHash;
-    next.error = null; next.output = null;
-    next.maxTokens = maxTokens;
-    next.effort = effort;
-    next.runtimeHealth = 'starting';
+    const next = tasks.beginRun(current, task => {
+      task.error = null;
+      task.output = null;
+      task.maxTokens = maxTokens;
+      task.effort = effort;
+      task.runtimeHealth = 'starting';
+    });
     // Keep one audit copy of the applied policy so a later file edit cannot
     // rewrite the report's historical body/hash.
     if (policy.meta.applied) {
@@ -1114,53 +1032,8 @@ export function createManager(options = {}) {
     return statusSummary(repository.peek(next.id) ?? next);
   }
   async function stop(id, closed, reason) {
-    let t = get(id);
-    if (t.status === 'closed') return statusSummary(t);
-    if (t.runtime?.manualActionRequired) {
-      throw new Error(`Task ${id} has an unverified residual runtime; confirm PID ${t.runtime.pid} manually before closing`);
-    }
-    const rec = runtime.get(id);
-    // A running/stopping record without an owned handle cannot prove that its
-    // executor is gone; refuse to mark it closed/cancelled silently.
-    if (!rec && ['running', 'stopping'].includes(t.status)) throw new Error(`Task ${id} has no owned runtime handle; exit is unconfirmed, refusing to change state`);
-    const target = transition(t, closed ? 'close' : 'stop');
-    if (rec) {
-      if (!runtime.beginClose(id)) throw new Error('Already stopping; refresh state');
-      t.status = 'stopping'; save(t); event(t, {kind: 'stop_requested', closed});
-      if (runtime.sendClose(id)) markUntrusted(id, 'close IPC send failure');
-      const graceful = await runtime.waitForExit(id, DEFAULT_EXIT_TIMEOUT_MS);
-      if (!graceful) {
-        // Only the worker handle owned by this manager is addressed.
-        if (process.platform === 'win32') {
-          const kill = spawn('taskkill', ['/PID', String(rec.w.pid), '/T', '/F'], {windowsHide: true, stdio: 'ignore'});
-          await once(kill, 'exit');
-        } else rec.w.kill('SIGKILL');
-        const gone = await runtime.waitForExit(id, FORCE_EXIT_TIMEOUT_MS);
-        if (!gone) throw new Error(`Task ${id}: could not confirm worker exit; data and workspace lock retained`);
-      }
-      // If the process is demonstrably gone but its exit event was missed,
-      // release the owned handle now. Until this point the workspace lock held.
-      runtime.forget(id);
-      const closeError = runtime.closeError(id);
-      if (closeError) {
-        t.status = 'failed'; t.error = `Task ${id} runtime cleanup failed: ${closeError}`;
-        save(t); throw new Error(t.error);
-      }
-    }
-    // stop() waits for process exit, so the runtime may have persisted a
-    // terminal round state while this call was waiting. Merge the final
-    // lifecycle fields into the latest record instead of saving the stale
-    // pre-wait snapshot.
-    const latest = repository.peek(id) ?? target;
-    const finalTask = {
-      ...latest,
-      status: target.status,
-      updatedAt: new Date().toISOString(),
-      error: reason ?? target.error,
-    };
-    if (closed) finalTask.reportHash = acceptance.exportReport(finalTask, {policySection: policyReportSection(finalTask)}).hash;
-    event(finalTask, {kind: closed ? 'closed' : 'cancelled'});
-    return statusSummary(save(finalTask));
+    const result = await tasks.stop(id, {closed, reason});
+    return statusSummary(result.task);
   }
   /** Preview/deletion preconditions and the fingerprint live in the module. */
   function deletionPreview(t) {
@@ -1173,48 +1046,59 @@ export function createManager(options = {}) {
     const id = `task-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
     const preflight = preflightCreate(a, id);
     const dir = directory(id);
-    fs.mkdirSync(dir); fs.mkdirSync(path.join(dir, 'home')); fs.mkdirSync(path.join(dir, 'tmp'));
-    let lease = null;
-    let t;
-    try {
-      lease = workspaceLeases.materialize(preflight.workspacePlan);
-      const executionWorkspace = resolveWorkspace(lease.executionWorkspace);
-      t = {
-        id,
-        schemaVersion: 2,
-        sessionId: `session-${id}`,
-        workspace: executionWorkspace,
-        sourceWorkspace: lease.sourceWorkspace,
-        workspaceLease: lease,
-        home: path.join(dir, 'home'),
-        patch: path.join(dir, 'runtime.patch.json'),
-        model: preflight.provider.model || config.model,
-        provider: preflight.provider,
-        plan: a.plan ?? a.prompt,
-        criteria: a.criteria ?? 'Delegating Agent must inspect outputs and run its own checks',
-        status: 'created',
-        rounds: [],
-        eventSequence: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        acceptance: null,
-        effort: preflight.effort,
-        usageLimits: preflight.usageLimits,
-      };
-      if (a.kind === 'research' && typeof a.batchId === 'string' && typeof a.shardId === 'string') {
-        t.kind = 'research';
-        t.batchId = a.batchId;
-        t.shardId = a.shardId;
-      }
-      // Only write DSH runtime patch for DSH SDK providers.
-      if (preflight.provider.type === 'dsh-sdk') patchFor(t);
-      save(t);
-    } catch (error) {
-      try { workspaceLeases.rollback(lease); } catch {}
-      try { repository.delete(id); fs.rmSync(dir, {recursive: true, force: true}); } catch {}
-      throw error;
-    }
-    return executeRun(t, preflight.prompt, preflight.maxTokens, preflight.effort);
+    const created = tasks.create({
+      taskId: id,
+      request: a,
+      directory: dir,
+      makeDirectories: () => {
+        fs.mkdirSync(dir);
+        fs.mkdirSync(path.join(dir, 'home'));
+        fs.mkdirSync(path.join(dir, 'tmp'));
+      },
+      removeDirectory: () => fs.rmSync(dir, {recursive: true, force: true}),
+      preflight: {
+        ...preflight,
+        workspaceMode: a.workspaceMode ?? config.workspaceMode ?? 'auto',
+        conflictFor: workspace => {
+          const conflict = workspaceConflict(workspace);
+          return conflict ? {...conflict, live: workers.has(conflict.id)} : null;
+        },
+      },
+      buildRecord: ({lease}) => {
+        const executionWorkspace = resolveWorkspace(lease.executionWorkspace);
+        const t = {
+          id,
+          schemaVersion: 2,
+          sessionId: `session-${id}`,
+          workspace: executionWorkspace,
+          sourceWorkspace: lease.sourceWorkspace,
+          workspaceLease: lease,
+          home: path.join(dir, 'home'),
+          patch: path.join(dir, 'runtime.patch.json'),
+          model: preflight.provider.model || config.model,
+          provider: preflight.provider,
+          plan: a.plan ?? a.prompt,
+          criteria: a.criteria ?? 'Delegating Agent must inspect outputs and run its own checks',
+          status: 'created',
+          rounds: [],
+          eventSequence: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          acceptance: null,
+          effort: preflight.effort,
+          usageLimits: preflight.usageLimits,
+        };
+        if (a.kind === 'research' && typeof a.batchId === 'string' && typeof a.shardId === 'string') {
+          t.kind = 'research';
+          t.batchId = a.batchId;
+          t.shardId = a.shardId;
+        }
+        // Only write DSH runtime patch for DSH SDK providers.
+        if (preflight.provider.type === 'dsh-sdk') patchFor(t);
+        return t;
+      },
+    });
+    return executeRun(created.task, preflight.prompt, preflight.maxTokens, preflight.effort);
   }
   async function action(name, a = {}) {
     if (!a || typeof a !== 'object' || Array.isArray(a)) throw new Error('Arguments must be an object');
@@ -1250,41 +1134,45 @@ export function createManager(options = {}) {
         // Strict validation happens before any state, round, budget, grant, or file change.
         const currentLimits = effectiveUsageLimits(t);
         const requestedLimits = resolveLimitOverride(a.usageLimits, currentLimits);
-        const override = parseOverrideOptions(a);
+        const override = parseOverride(a);
         const requested = parseOptionalMaxTokens(a.maxTokens);
         const requestedEffort = parseOptionalEffort(a.effort);
         if (requestedEffort !== undefined && !supportsEffort(t.provider)) {
           throw new Error(`effort is not supported by provider "${t.provider?.name ?? 'unknown'}" (${t.provider?.type ?? 'unknown'})`);
         }
         validatePrompt(a.prompt);
-        const original = baseReworkBlockedReason(t);
-        if (original) throw new Error(original);
         const snapshot = usageSnapshot(t, {persist: false});
         const usage = snapshot.statusUsage;
-        if (usage.limitState === 'blocked' && !override.enabled) {
-          throw new Error(usageLimitBlockReason(usage));
-        }
+        const decision = decideRework({
+          baseBlockedReason: baseReworkBlockedReason(t),
+          usage,
+          override,
+        });
+        if (!decision.allowed) throw new Error(decision.reason);
         const maxTokens = resolveRoundBudget({requested, inherited: t.maxTokens, fallback: config.maxTokens});
         const effort = supportsEffort(t.provider)
           ? resolveRoundEffort({requested: requestedEffort, inherited: t.effort ?? undefined,
             fallback: config.defaultEffort ?? DEFAULT_EFFORT})
           : null;
         const afterLimits = requestedLimits ?? currentLimits;
-        if (override.enabled) {
+        if (decision.overridden) {
           t.lastLimitOverride = {at: new Date().toISOString(), reason: override.reason};
-          event(t, {kind: 'limit_override', reason: override.reason,
-            usage: {internalRequests: usage.internalRequests, estimatedCostCny: usage.estimatedCostCny,
-              costLimitReliable: usage.costLimitReliable, limitState: usage.limitState},
-            limitsBefore: {...currentLimits}, limitsAfter: {...afterLimits}});
+          const payload = overrideEvent({
+            at: t.lastLimitOverride.at,
+            reason: override.reason,
+            usage,
+            before: currentLimits,
+            after: afterLimits,
+          });
+          delete payload.at;
+          event(t, payload);
         }
         if (requestedLimits) t.usageLimits = requestedLimits;
         return executeRun(t, a.prompt, maxTokens, effort);
       }
       case 'cleanup_worktree': {
         const t = get(a.id);
-        if (t.status !== 'closed') throw new Error('Close the task before cleaning its worktree');
-        if (workers.has(t.id)) throw new Error('Runtime exit is not confirmed; worktree retained');
-        const result = workspaceLeases.cleanup(t.workspaceLease);
+        const result = workspaceLeases.release({task: t, live: workers.has(t.id)});
         event(t, {kind: 'worktree_cleaned', ...result});
         save(t);
         return {id: t.id, ...result};

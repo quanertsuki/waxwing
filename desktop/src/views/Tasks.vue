@@ -24,7 +24,7 @@
             <div v-for="task in tasks" :key="task.id" class="task-card" @click="selectTask(task)">
                 <div class="task-header">
                     <span class="task-id">{{ task.id }}</span>
-                    <span class="status" :class="task.status">{{ statusLabel(task.status) }}</span>
+                    <span class="status" :class="task.status">{{ task.statusLabel || task.status }}</span>
                     <span v-if="task.live" class="live-badge">LIVE</span>
                     <span v-if="task.runtimeHealth === 'unhealthy'" class="health-badge">HEARTBEAT STALE</span>
                 </div>
@@ -70,6 +70,7 @@ interface TaskUsage {
 interface Task {
     id: string;
     status: string;
+    statusLabel?: string;
     roundCount: number;
     provider?: string;
     model?: string;
@@ -80,6 +81,7 @@ interface Task {
     maxTokens?: number;
     usage?: TaskUsage;
     workspaceMode?: string;
+    workspaceLabel?: string;
     runtimeHealth?: string;
     createdAt?: string;
     updatedAt?: string;
@@ -92,19 +94,6 @@ const selectedTask = ref<Task | null>(null);
 const managerRunning = ref(true);
 const showCreate = ref(false);
 let pollTimer: number | undefined;
-
-function statusLabel(status: string): string {
-    const labels: Record<string, string> = {
-        running: '运行中',
-        awaiting_review: '待验收',
-        failed: '失败',
-        accepted: '已验收',
-        closed: '已关闭',
-        cancelled: '已取消',
-        created: '已创建'
-    };
-    return labels[status] || status;
-}
 
 function selectTask(task: Task) {
     selectedTask.value = task;

@@ -14,7 +14,7 @@
 
       <template v-else-if="detail">
         <section class="status-strip">
-          <span class="status" :class="detail.status">{{ statusLabel(detail.status) }}</span>
+          <span class="status" :class="detail.status">{{ detail.statusLabel || detail.status }}</span>
           <span :class="['health', detail.runtimeHealth]">心跳 {{ detail.runtimeHealth || 'unknown' }}</span>
           <span>{{ detail.live ? 'Runtime live' : 'Runtime stopped' }}</span>
           <span>Round {{ detail.roundCount }}</span>
@@ -33,7 +33,7 @@
         <section class="detail-section">
           <h4>工作区租约</h4>
           <div class="info-grid">
-            <div><span>模式</span>{{ detail.workspaceMode || 'legacy' }}</div>
+            <div><span>模式</span>{{ detail.workspaceLabel || detail.workspaceMode || 'legacy' }}</div>
             <div><span>租约</span>{{ detail.worktreeStatus || '-' }}</div>
             <div class="wide"><span>执行目录</span><code>{{ detail.workspace }}</code></div>
             <div v-if="detail.sourceWorkspace" class="wide"><span>来源目录</span><code>{{ detail.sourceWorkspace }}</code></div>
@@ -123,6 +123,7 @@ import { invoke } from '@tauri-apps/api/core';
 interface TaskDetail {
   id: string;
   status: string;
+  statusLabel?: string;
   roundCount: number;
   roundId?: string;
   provider?: string;
@@ -130,6 +131,7 @@ interface TaskDetail {
   workspace: string;
   sourceWorkspace?: string;
   workspaceMode?: string;
+  workspaceLabel?: string;
   worktreeStatus?: string;
   branch?: string;
   baseCommit?: string;
@@ -177,20 +179,6 @@ const tabs = [
   { id: 'diff', label: 'Diff' },
   { id: 'log', label: '日志' },
 ];
-
-function statusLabel(status: string): string {
-  const labels: Record<string, string> = {
-    running: '运行中',
-    stopping: '停止中',
-    awaiting_review: '待验收',
-    failed: '失败',
-    accepted: '已验收',
-    closed: '已关闭',
-    cancelled: '已取消',
-    created: '已创建',
-  };
-  return labels[status] || status;
-}
 
 async function loadDetail(initial = false) {
   if (initial) loading.value = true;
