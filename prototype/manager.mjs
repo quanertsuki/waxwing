@@ -3,7 +3,7 @@
 // with an injected worker factory (forking is unavailable in some sandboxes).
 import fs from 'node:fs';
 import path from 'node:path';
-import {randomUUID, createHash} from 'node:crypto';
+import {randomUUID} from 'node:crypto';
 import {fork, spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnvironment,
@@ -19,7 +19,9 @@ import {
   mergeLimits,
   overrideEvent,
   parseOverride,
+  unavailableUsageSnapshot,
 } from '../src/usage/policy.mjs';
+import {ExecutionPolicy} from '../src/usage/execution-policy.mjs';
 import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {RuntimeLifecycle} from '../src/runtime/lifecycle.mjs';
@@ -51,19 +53,12 @@ const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
 const ACTIVE_TASK = new Set(['created', 'running', 'stopping']);
 const STATUS_VIEWS = ['summary', 'result', 'history', 'usage', 'report', 'workspace', 'diff', 'log'];
-const DEFAULT_POLICY_FILE = 'execution-policy.md';
 const isHighSurrogate = c => c >= 0xd800 && c <= 0xdbff;
 const isLowSurrogate = c => c >= 0xdc00 && c <= 0xdfff;
 
 function shortMessage(error) {
   const text = error?.message ?? String(error);
   return text.length > 240 ? `${text.slice(0, 239)}…` : text;
-}
-function digestText(text) {
-  return createHash('sha256').update(text).digest('hex');
-}
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 /** Resolve optional per-call limits over a complete base set. */
 function resolveLimitOverride(value, base) {
@@ -72,74 +67,6 @@ function resolveLimitOverride(value, base) {
 function effectiveUsageLimits(t) {
   return effectiveLimits(t?.usageLimits, config.usageLimits);
 }
-function policyConfiguration() {
-  const value = config.executionPolicy;
-  if (!isPlainObject(value)) return {enabled: false, version: null, file: null};
-  return {
-    enabled: value.enabled === true,
-    version: Number.isSafeInteger(value.version) ? value.version : null,
-    file: typeof value.file === 'string' ? value.file : null,
-  };
-}
-function executionPolicyPath() {
-  const file = policyConfiguration().file || DEFAULT_POLICY_FILE;
-  return path.isAbsolute(file) ? path.resolve(file) : path.resolve(HERE, file);
-}
-/** Read the policy without ever failing a task; failures become a warning. */
-function readExecutionPolicy() {
-  const settings = policyConfiguration();
-  if (!settings.enabled) {
-    return {enabled: false, version: settings.version, sha256: null, text: null, applied: false, warning: null};
-  }
-  try {
-    const text = fs.readFileSync(executionPolicyPath(), 'utf8');
-    if (!text.trim()) {
-      return {enabled: true, version: settings.version, sha256: null, text: null, applied: false,
-        warning: `Execution policy file is empty: ${executionPolicyPath()}`};
-    }
-    return {enabled: true, version: settings.version, sha256: digestText(text), text, applied: true, warning: null};
-  } catch (error) {
-    return {enabled: true, version: settings.version, sha256: null, text: null, applied: false,
-      warning: `Execution policy file is unavailable: ${shortMessage(error)}`};
-  }
-}
-function policyForRound() {
-  const policy = readExecutionPolicy();
-  const meta = {enabled: policy.enabled, version: policy.version, sha256: policy.sha256, applied: policy.applied};
-  if (policy.warning) meta.warning = policy.warning;
-  return {meta, text: policy.text};
-}
-/** One bounded policy appendix for the exported report. */
-function policyReportSection(t) {
-  const applied = [...(t.rounds ?? [])].reverse().find(round => round.policy?.applied)?.policy;
-  if (!applied) return '';
-  const header = `\n## Execution policy\n\nVersion: ${applied.version}\nSHA-256: ${applied.sha256}\n`;
-  const snapshot = t.policySnapshot && t.policySnapshot.sha256 === applied.sha256 &&
-    typeof t.policySnapshot.text === 'string' && t.policySnapshot.text.trim() ? t.policySnapshot : null;
-  if (snapshot) {
-    let currentNote = '';
-    try {
-      const currentHash = digestText(fs.readFileSync(executionPolicyPath(), 'utf8'));
-      if (currentHash !== snapshot.sha256) {
-        currentNote = `Current SHA-256: ${currentHash} (policy changed after the applied round)\n`;
-      }
-    } catch {}
-    return `${header}${currentNote ? `\n${currentNote}` : ''}\n${snapshot.text}\n`;
-  }
-  try {
-    const text = fs.readFileSync(executionPolicyPath(), 'utf8');
-    if (!text.trim()) return `${header}\n(Policy text is no longer available.)\n`;
-    const currentHash = digestText(text);
-    const hashLines = currentHash === applied.sha256
-      ? `SHA-256: ${applied.sha256}`
-      : `SHA-256: ${applied.sha256}\nCurrent SHA-256: ${currentHash} (policy changed after the applied round)`;
-    return `\n## Execution policy\n\nVersion: ${applied.version}\n${hashLines}\n\n${text}\n`;
-  } catch (error) {
-    return `${header}\n(Policy text is no longer available: ${shortMessage(error)})\n`;
-  }
-}
-
-
 /** Collapse whitespace so a bounded summary cannot grow through JSON escapes. */
 function oneLine(value) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
@@ -228,6 +155,10 @@ function parseWaitSeconds(value) {
 export function createManager(options = {}) {
   ensureDirs();
   const repository = new TaskRepository({runsDir: RUNS, atomicJson});
+  const executionPolicy = new ExecutionPolicy({
+    configuration: () => config.executionPolicy,
+    baseDirectory: HERE,
+  });
   // Reports, hashes, preview fingerprints, and human grants belong to the
   // Acceptance module. The manager only injects the data directories.
   const acceptance = new AcceptanceService({reportsDir: REPORTS, grantsDir: RUNTIME});
@@ -339,28 +270,7 @@ export function createManager(options = {}) {
       const reason = shortMessage(error);
       let limits = config.usageLimits;
       try { limits = effectiveUsageLimits(t); } catch {}
-      return {
-        available: false,
-        statusUsage: {
-          available: false,
-          error: reason,
-          requests: 0,
-          requestsWithoutUsage: 0,
-          estimatedCostCny: null,
-          costComplete: false,
-          internalRequests: 0,
-          limits,
-          limitState: 'unavailable',
-          limitWarning: true,
-          limitBlocked: false,
-          limitsEvaluated: false,
-          costLimitReliable: false,
-          warnings: [`Usage data is unavailable: ${reason}`],
-        },
-        usageRounds: [],
-        listUsage: {available: false, error: reason},
-        computed: null,
-      };
+      return unavailableUsageSnapshot({task: t, reason, limits});
     }
   }
   function validatePrompt(value) {
@@ -658,7 +568,7 @@ export function createManager(options = {}) {
     return {id: t.id, view: 'log', path: file, ...pageOf(content, offset, limit)};
   }
   function reportPage(t, offset, limit) {
-    const content = acceptance.content(t, {policySection: policyReportSection(t)});
+    const content = acceptance.content(t, {policySection: executionPolicy.reportSection(t)});
     return {id: t.id, view: 'report', ...pageOf(content, offset, limit)};
   }
   function event(t, data) {
@@ -830,7 +740,7 @@ export function createManager(options = {}) {
     workspace: workspaceLeases,
     acceptance: {
       revoke: task => acceptance.revoke(task),
-      report: task => acceptance.exportReport(task, {policySection: policyReportSection(task)}),
+      report: task => acceptance.exportReport(task, {policySection: executionPolicy.reportSection(task)}),
     },
     gracefulExitTimeoutMs: DEFAULT_EXIT_TIMEOUT_MS,
     forceExitTimeoutMs: FORCE_EXIT_TIMEOUT_MS,
@@ -949,8 +859,8 @@ export function createManager(options = {}) {
   async function executeRun(t, userPrompt, maxTokens, effort = null) {
     // The policy is read at round start; the recorded prompt stays the raw user
     // instruction and each round keeps the version/hash actually applied.
-    const policy = policyForRound();
-    const effectivePrompt = policy.meta.applied ? `${userPrompt}\n---\n${policy.text}` : userPrompt;
+    const policy = executionPolicy.round();
+    const effectivePrompt = executionPolicy.prompt(userPrompt, policy);
     const prepared = await tasks.prepareRun(t.id, {
       prompt: userPrompt,
       maxTokens,
@@ -1130,7 +1040,7 @@ export function createManager(options = {}) {
         const t = transition(get(a.id), 'accept');
         const accepted = acceptance.acceptAndSave(t, {
           evidence: a.evidence,
-          policySection: policyReportSection(t),
+          policySection: executionPolicy.reportSection(t),
           save,
         });
         event(accepted, {kind: 'accepted', evidence: a.evidence});
@@ -1138,7 +1048,7 @@ export function createManager(options = {}) {
       }
       case 'export': {
         const t = get(a.id);
-        return acceptance.exportAndSave(t, {policySection: policyReportSection(t), save});
+        return acceptance.exportAndSave(t, {policySection: executionPolicy.reportSection(t), save});
       }
       case 'preview_delete': return deletionPreview(get(a.id));
       case 'grant_delete': {

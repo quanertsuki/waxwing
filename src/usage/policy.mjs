@@ -229,4 +229,47 @@ export function overrideEvent({at, reason, usage, before, after}) {
   };
 }
 
+/**
+ * One unavailable-snapshot projection for the usage module and manager
+ * fallback. A metrics failure degrades observability only: limits continue to
+ * follow the opt-in policy and never block execution by themselves.
+ */
+export function unavailableUsageSnapshot({task = null, reason, limits}) {
+  const bounded = boundedReason(reason ?? 'usage is unavailable', 240);
+  const evaluation = evaluateLimits({
+    available: false,
+    requests: 0,
+    requestsWithoutUsage: 0,
+    estimatedCostCny: null,
+    costComplete: false,
+  }, limits);
+  const {message, ...limitFields} = evaluation;
+  const warnings = [`Usage data is unavailable: ${bounded}`];
+  const statusUsage = {
+    available: false,
+    error: bounded,
+    requests: 0,
+    requestsWithoutUsage: 0,
+    estimatedCostCny: null,
+    costComplete: false,
+    ...limitFields,
+    warnings,
+  };
+  if (task && typeof task.lastLimitOverride === 'object' && task.lastLimitOverride &&
+      typeof task.lastLimitOverride.at === 'string') {
+    statusUsage.limitOverride = {
+      at: task.lastLimitOverride.at,
+      reason: boundedReason(task.lastLimitOverride.reason),
+    };
+  }
+  return {
+    available: false,
+    statusUsage,
+    usageRounds: [],
+    listUsage: {available: false, error: bounded},
+    computed: null,
+    limits,
+  };
+}
+
 export {LIMIT_FIELDS, OVERRIDE_REASON_LIMIT};

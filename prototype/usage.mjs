@@ -10,7 +10,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {HERE,config} from './common.mjs';
-import {boundedReason,evaluateLimits,effectiveLimits} from '../src/usage/policy.mjs';
+import {
+    boundedReason,
+    effectiveLimits,
+    evaluateLimits,
+    unavailableUsageSnapshot,
+} from '../src/usage/policy.mjs';
 
 const INDEX_VERSION=1;
 const INDEX_NAME='usage-index.json';
@@ -747,25 +752,7 @@ export function usageForTask(task,taskDir,options={}) {
         return result;
     } catch (error) {
         const reason=shortError(error);
-        const evaluation=evaluateLimits({available:false,requests:0,requestsWithoutUsage:0,
-            estimatedCostCny:null,costComplete:false},limits);
-        const {message,...limitFields}=evaluation;
-        const warnings=[`Usage data is unavailable: ${reason}`];
-        const statusUsage={available:false,error:reason,requests:0,requestsWithoutUsage:0,
-            estimatedCostCny:null,costComplete:false,...limitFields,warnings};
-        if (task&&typeof task.lastLimitOverride==='object'&&task.lastLimitOverride&&
-            typeof task.lastLimitOverride.at==='string') {
-            statusUsage.limitOverride={at:task.lastLimitOverride.at,
-                reason:boundedReason(task.lastLimitOverride.reason)};
-        }
-        return {
-            available:false,
-            statusUsage,
-            usageRounds:[],
-            listUsage:{available:false,error:reason},
-            computed:null,
-            limits,
-        };
+        return unavailableUsageSnapshot({task,reason,limits});
     }
 }
 
