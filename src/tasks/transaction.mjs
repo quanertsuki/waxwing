@@ -174,6 +174,67 @@ export class TaskTransaction {
     return next;
   }
 
+  /**
+   * Prepare the next round after the previous runtime has explicitly released.
+   * The caller supplies a fully-validated prompt/budget/effort and a policy
+   * snapshot; this method owns read-after-gate, lifecycle transition,
+   * acceptance revocation, round numbering, and the persisted round record.
+   */
+  async prepareRun(taskId, {
+    prompt,
+    maxTokens,
+    effort = null,
+    policy = {meta: {}, text: null},
+    configure,
+  } = {}) {
+    const startedAt = this.now();
+    let current = this.repository.peek(taskId);
+    if (!current) throw new Error('Unknown task');
+    const active = this.runtime.get(taskId);
+    if (active && active.phase !== 'idle') {
+      const released = await this.runtime.waitForRelease(taskId);
+      current = this.repository.peek(taskId) ?? current;
+      if (!released) {
+        throw new Error(`Task ${taskId}: previous runtime exited before releasing its round; create a new task`);
+      }
+      if (current.status === 'running') {
+        throw new Error('Task is already running; wait for the current round to finish');
+      }
+    }
+    if (current.status === 'running') {
+      throw new Error('Task is already running; wait for the current round to finish');
+    }
+    const roundId = this.runtime.createRoundId();
+    const next = this.beginRun(current, value => {
+      value.error = null;
+      value.output = null;
+      value.maxTokens = maxTokens;
+      value.effort = effort;
+      value.runtimeHealth = 'starting';
+      if (typeof configure === 'function') configure(value);
+    });
+    if (policy?.meta?.applied) {
+      next.policySnapshot = {
+        version: policy.meta.version,
+        sha256: policy.meta.sha256,
+        text: policy.text,
+      };
+    }
+    const number = next.rounds.length + 1;
+    next.rounds.push({
+      roundId,
+      number,
+      prompt,
+      startedAt,
+      maxTokens,
+      effort,
+      policy: policy?.meta ?? {},
+    });
+    this.save(next);
+    this.event(next, {kind: 'round_started', roundId, number, maxTokens, effort});
+    return {task: next, roundId, number, startedAt};
+  }
+
   async forceExit(taskId, rec) {
     if (typeof this.terminate !== 'function') {
       throw new Error('terminate dependency is required to force runtime exit');
