@@ -33,6 +33,10 @@ if (samePath(root, REAL_ROOT)) {
 }
 if (auto) fs.rmSync(root, {recursive: true, force: true});
 fs.mkdirSync(root, {recursive: true});
+// WAXWING_HOME wins over DSH_SUBAGENT_ROOT during config resolution, so it is
+// pinned as well: an inherited WAXWING_HOME from a live runtime must never move
+// a test suite back onto real data.
+process.env.WAXWING_HOME = root;
 process.env.DSH_SUBAGENT_ROOT = root;
 process.env.DSH_PROTOTYPE_ROOT = root;
 process.env.DSH_SUBAGENT_PROVIDERS_DIR = TEST_PROVIDERS;

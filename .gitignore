@@ -1,6 +1,8 @@
 # Sensitive data
 /data/
+/data-research/
 /prototype-data/
+/prototype-data-research/
 prototype/config.local.json
 *.local.json
 *.credentials*
@@ -28,6 +30,14 @@ server-token
 .internal/
 .local-archive/
 .npm-cache/
+*.bak
+*.bak-*
+/final-suite.txt
+/npm-final.cmd
+/npm-final.txt
+/npmtest*.txt
+/rm-out.txt
+/tmp-*.txt
 $null
 docs/magpie-agent-plugin-report-*.md
 /integrations/.local/

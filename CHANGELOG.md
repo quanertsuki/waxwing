@@ -5,6 +5,17 @@ and uses semantic versioning for public releases.
 
 ## [Unreleased]
 
+### Added
+
+- Server-side `wait` and `research_wait` actions, CLI commands, and
+  `waxwing_wait` / `waxwing_research_wait` MCP tools
+- Parallel research batches with one scratch workspace per shard, automatic
+  shard-runtime release, partial-failure retention, and one aggregate report
+- `waxwing_research_*` MCP tools and `research-*` CLI commands for read-only
+  fan-out across articles, web pages, and repositories
+- `WAXWING_RESEARCH_ROOT` for moving per-shard scratch workspaces away from the
+  per-user state directory
+
 ### Changed
 
 - Routine npm, Cargo, Tauri, and GitHub Actions updates are grouped while

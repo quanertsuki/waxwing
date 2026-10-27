@@ -14,7 +14,7 @@ test('Magpie agent plugin stays inside the loader sandbox', async () => {
   const source = fs.readFileSync(PLUGIN, 'utf8');
   // Magpie hands the plugin only `console`: no import.meta.url, no process.
   const code = source.replace(/^\s*\/\/.*$/gm, '');
-  assert.doesNotMatch(source, /from\s+["']node:/);
+  assert.doesNotMatch(code, /from\s+["']node:/);
   assert.doesNotMatch(code, /import\.meta/);
   assert.doesNotMatch(code, /\bprocess\./);
 

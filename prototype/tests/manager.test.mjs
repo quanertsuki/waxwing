@@ -49,6 +49,7 @@ function onMessage(message,child) {
     child.emit('message',{kind:'result',roundId:message.roundId,text:`budget=${message.maxTokens}`,finishReason:'completed'});
     child.emit('message',{kind:'released',roundId:message.roundId});
   };
+  if(message.prompt.includes('[hold]'))return;
   if(message.prompt.includes('[slow]'))setTimeout(finish,300);else setImmediate(finish);
 }
 const manager=createManager({forkWorker:fakeFork});
@@ -144,6 +145,27 @@ test('a rework supplied while the task is running is refused and adds no round',
   const done=await settled(created.id);
   assert.equal(done.roundCount,1);
   assert.equal(done.status,'awaiting_review');
+});
+
+test('wait returns one terminal summary without caller-side polling',async()=>{
+  const created=await create({prompt:'[slow] work'});
+  const started=Date.now();
+  const done=await manager.action('wait',{id:created.id,timeoutSeconds:2});
+  assert.equal(done.status,'awaiting_review');
+  assert.equal(done.wait.timedOut,false);
+  assert.equal(done.wait.timeoutSeconds,2);
+  assert.ok(Date.now()-started>=250);
+});
+
+test('wait reports a timeout while retaining the managed task',async()=>{
+  const created=await create({prompt:'[hold] work'});
+  const started=Date.now();
+  const pending=await manager.action('wait',{id:created.id,timeoutSeconds:1});
+  assert.equal(pending.status,'running');
+  assert.equal(pending.wait.timedOut,true);
+  assert.ok(Date.now()-started>=900);
+  assert.equal((await manager.action('status',{id:created.id})).status,'running');
+  await manager.action('close',{id:created.id});
 });
 
 test('invalid budgets are rejected before any task, round, or file change',async()=>{

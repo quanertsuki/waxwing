@@ -1,24 +1,24 @@
 sequenceDiagram
   autonumber
   participant Delegating as Delegating Agent
-  participant Supervisor as RuntimeSupervisor
+  participant Runtime as Runtime module
   participant Repository as TaskRepository
   participant Worker as Worker Agent
 
-  Delegating->>Supervisor: dispatch round(roundId)
-  Supervisor->>Repository: persist round_started(sequence, roundId)
-  Supervisor->>Worker: run(roundId)
-  Worker-->>Supervisor: ack(roundId)
+  Delegating->>Runtime: dispatch round(roundId)
+  Runtime->>Repository: persist round_started(sequence, roundId)
+  Runtime->>Worker: run(roundId)
+  Worker-->>Runtime: ack(roundId)
 
   loop Every 5 seconds while working
-    Worker-->>Supervisor: heartbeat(roundId)
+    Worker-->>Runtime: heartbeat(roundId)
   end
 
-  Worker-->>Supervisor: events(roundId)
-  Worker-->>Supervisor: result or error(roundId)
-  Supervisor->>Repository: persist round_finished(sequence, roundId)
-  Worker-->>Supervisor: released(roundId)
-  Supervisor-->>Delegating: next round allowed
+  Worker-->>Runtime: events(roundId)
+  Worker-->>Runtime: result or error(roundId)
+  Runtime->>Repository: persist round_finished(sequence, roundId)
+  Worker-->>Runtime: released(roundId)
+  Runtime-->>Delegating: next round allowed
 
-  Note over Supervisor,Worker: No rework or Provider fallback before released
-  Note over Supervisor: Stale, duplicate, and old roundId messages are ignored
+  Note over Runtime,Worker: No rework or Provider fallback before released
+  Note over Runtime: Stale, duplicate, and old roundId messages are ignored

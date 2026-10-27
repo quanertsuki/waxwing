@@ -1,8 +1,8 @@
 /**
- * Coordination primitives shared by the manager's runtime state machine.
- * Process ownership and message validation stay in the manager until the 0.2
- * extraction; this class owns the release and exit gates so a terminal message
- * can never be mistaken for permission to dispatch another round.
+ * Low-level release and exit gates used by the Runtime module. Process
+ * ownership, message validation, and round state live in `module.mjs`; this
+ * class only ensures a terminal message is not permission to dispatch the next
+ * round and that exit is confirmed by the process handle.
  */
 export class RuntimeSupervisor {
   settleRelease(record, value) {

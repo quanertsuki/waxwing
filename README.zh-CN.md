@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Waxwing 是一个本地优先的委派管理器，面向 DeepSeek 和兼容 OpenAI 的编码
-Agent。Delegating Agent 定义任务与验收标准，Worker Agent 实现任务，委派方
+Agent。亲代 Agent 定义任务与验收标准，执行 Agent 实现任务，亲代 Agent
 再独立检查证据，并决定返工、验收或关闭。
 
 CLI、MCP stdio 和 Tauri 桌面端是同一管理器的三个入口。管理器只监听
@@ -20,12 +20,14 @@ CLI、MCP stdio 和 Tauri 桌面端是同一管理器的三个入口。管理器
 - **无需控制平面**：任务和证据留在本机，不依赖托管服务。
 - **Provider 中立**：支持 DeepSeek Harness，也支持任意兼容 OpenAI Chat
   Completions 的端点。
-- **独立验收**：Worker Agent 声称“完成”不等于验收通过。Delegating Agent
+- **独立验收**：执行 Agent 声称“完成”不等于验收通过。亲代 Agent
   必须记录自己实际执行的检查和证据。
 - **可靠轮次租约**：`roundId`、ACK、心跳、终态和 `released` 组成显式协议，
   返工与 Provider 回退不会在结果刚落盘时抢占同一运行时。
 - **工作区隔离**：干净的 Git 仓库默认使用独立 worktree；非 Git 目录使用共享
   工作区排他锁。
+- **并行研究分片**：一个批次可把多个只读资料、网页或仓库调查并行交给不同
+  执行 Agent，最后汇总为一份带来源的报告。
 - **默认不限制请求和费用**：只有显式启用阈值时才告警或阻断。
 - **有界接口**：默认 CLI/MCP 响应保持精简；结果、报告、历史、用量、工作区、
   Diff 和日志按需分页。
@@ -113,6 +115,8 @@ waxwing create @task.json
 ### 3. 检查、验收与返工
 
 ```bash
+waxwing wait task-xxxxxxxxxxxx
+waxwing wait task-xxxxxxxxxxxx --timeout 300
 waxwing status task-xxxxxxxxxxxx
 waxwing status task-xxxxxxxxxxxx --view result
 waxwing status task-xxxxxxxxxxxx --view report
@@ -127,8 +131,59 @@ waxwing close task-xxxxxxxxxxxx
 可用分页视图：`result`、`history`、`usage`、`report`、`workspace`、`diff`
 和 `log`。大内容使用 `--offset` 与 `--limit`。
 
-验收证据应记录 Delegating Agent 实际执行的检查，而不是重复 Worker Agent
+`wait` 是管理器内的单次阻塞调用：任务停止运行时立即返回；超时则返回当前
+有界摘要，并带有 `wait.timedOut: true`。默认截止时间为
+`roundTimeoutSeconds + 30`。
+
+验收证据应记录亲代 Agent 实际执行的检查，而不是重复执行 Agent
 的完成声明。
+
+### 4. 并行研究分片
+
+当一个亲代 Agent 需要同时阅读多篇文章、网页或项目时，使用研究批次。每个
+分片拥有独立 scratch 工作区，因此可以真正并发运行，不会写入源项目，也不会
+互相覆盖文件。
+
+`research.json`：
+
+```json
+{
+  "title": "对比候选项目",
+  "question": "哪个项目更适合，为什么？",
+  "commonPrompt": "引用来源，并明确说明不确定性。",
+  "shards": [
+    {
+      "id": "alpha",
+      "subject": "分析 Project Alpha",
+      "url": "https://github.com/example/alpha",
+      "focus": "架构与许可证"
+    },
+    {
+      "id": "beta",
+      "subject": "分析 Project Beta",
+      "url": "https://github.com/example/beta",
+      "focus": "维护活跃度与测试覆盖"
+    }
+  ]
+}
+```
+
+```bash
+waxwing research-start @research.json
+waxwing research-wait research-xxxxxxxxxxxx
+waxwing research-status research-xxxxxxxxxxxx
+waxwing research-collect research-xxxxxxxxxxxx
+```
+
+`research-wait` 用一次调用等待整个批次，也支持 `--timeout`。成功的分片
+运行时会自动关闭；某个分片失败时，其他已完成结果仍会保留。
+`research-collect` 把汇总报告写入 `<WAXWING_HOME>/reports`，可用 `--offset`
+和 `--limit` 分页读取。scratch 工作区默认位于 `<WAXWING_HOME>-research`，
+可用 `WAXWING_RESEARCH_ROOT` 覆盖。
+
+研究批次只用于只读调查和综合。多个执行 Agent 不应在同一物理项目目录中并行
+写入；需要并行写代码时，应为每个任务使用独立 worktree，或通过 `shared`
+串行修改。
 
 ## MCP
 
@@ -141,8 +196,11 @@ waxwing-mcp
 公开工具使用 `waxwing_*` 前缀。完整的 `ds_*` 工具目录在 `0.1.x` 中继续
 提供兼容，最早于 `0.2.0` 移除。
 
-核心工具包括 `create`、`list`、`status`、`rework`、`accept`、`cancel`、
+核心工具包括 `create`、`list`、`status`、`wait`、`rework`、`accept`、`cancel`、
 `close`、`cleanup_worktree`、`export`、`preview_delete` 和 `delete`。
+研究并行使用 `waxwing_research_start`、`waxwing_research_status`、
+`waxwing_research_wait`、`waxwing_research_collect` 和
+`waxwing_research_cancel`。
 
 客户端配置示例见 [`integrations/`](integrations/)。
 
@@ -213,6 +271,7 @@ Worker 每 5 秒发送心跳。20 秒无心跳只把运行时标记为 `unhealth
 | 变量 | 作用 |
 | --- | --- |
 | `WAXWING_HOME` | 每用户数据根目录 |
+| `WAXWING_RESEARCH_ROOT` | 研究分片 scratch 工作区的父目录 |
 | `WAXWING_CONFIG` | 主配置文件 |
 | `WAXWING_LOCAL_CONFIG` | 本地覆盖文件 |
 | `WAXWING_NODE` | Worker 使用的 Node 可执行文件 |

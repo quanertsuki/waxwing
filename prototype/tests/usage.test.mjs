@@ -568,11 +568,11 @@ test('CLI accepts view=usage and MCP exposes Waxwing plus legacy tools',async()=
     assert.deepEqual(parseStatusArgs([ID,'--view','usage']),{id:ID,view:'usage'});
     assert.deepEqual(parseStatusArgs([ID,'--view=usage','--offset=0','--limit=100']),{id:ID,view:'usage',offset:0,limit:100});
     assert.throws(()=>parseStatusArgs([ID,'--offset','0']),/result|history|usage/);
-    assert.equal(catalogue.length,22);
+  assert.equal(catalogue.length,34);
     const exportedStatus=catalogue.find(tool=>tool.name==='waxwing_status');
     assert.ok(exportedStatus.inputSchema.properties.view.enum.includes('usage'));
     const listed=await handle({jsonrpc:'2.0',id:1,method:'tools/list'});
-    assert.equal(listed.result.tools.length,22);
+    assert.equal(listed.result.tools.length,34);
     const statusTool=listed.result.tools.find(tool=>tool.name==='waxwing_status');
     assert.ok(statusTool.inputSchema.properties.view.enum.includes('usage'));
     assert.deepEqual(statusTool.inputSchema,exportedStatus.inputSchema);

@@ -112,6 +112,11 @@ export function loadConfiguration({here = DEFAULT_HERE, env = process.env} = {})
     platformDataRoot(env),
   );
   const root = resolveConfigPath(rootValue, configDir);
+  const researchRoot = resolveConfigPath(firstDefined(
+    env.WAXWING_RESEARCH_ROOT,
+    merged.researchRoot,
+    `${root}-research`,
+  ), configDir);
   const rootExplicit = Boolean(firstDefined(
     env.WAXWING_HOME,
     env.DSH_SUBAGENT_ROOT,
@@ -149,6 +154,7 @@ export function loadConfiguration({here = DEFAULT_HERE, env = process.env} = {})
     config: {
       ...merged,
       root,
+      researchRoot,
       dshRepo,
       credentialsFile,
       providersDir,
