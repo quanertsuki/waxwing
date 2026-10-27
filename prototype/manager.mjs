@@ -943,49 +943,17 @@ export function createManager(options = {}) {
    * task record, the grant revocations, and the startup-failure bookkeeping.
    */
   async function executeRun(t, userPrompt, maxTokens, effort = null) {
-    let current = repository.peek(t.id) ?? t;
-    const active = runtime.get(current.id);
-    // A terminal result is persisted immediately, but the worker still owns the
-    // round until it sends `released`. Both rework and provider fallback wait at
-    // this gate; neither is allowed to race the worker's busy flag.
-    if (active && active.phase !== 'idle') {
-      const released = await runtime.waitForRelease(current.id);
-      current = repository.peek(t.id) ?? current;
-      if (!released) {
-        throw new Error(`Task ${t.id}: previous runtime exited before releasing its round; create a new task`);
-      }
-    }
-    if (current.status === 'running') {
-      throw new Error('Task is already running; wait for the current round to finish');
-    }
     // The policy is read at round start; the recorded prompt stays the raw user
     // instruction and each round keeps the version/hash actually applied.
     const policy = policyForRound();
     const effectivePrompt = policy.meta.applied ? `${userPrompt}\n---\n${policy.text}` : userPrompt;
-    const roundId = runtime.createRoundId();
-    const next = tasks.beginRun(current, task => {
-      task.error = null;
-      task.output = null;
-      task.maxTokens = maxTokens;
-      task.effort = effort;
-      task.runtimeHealth = 'starting';
-    });
-    // Keep one audit copy of the applied policy so a later file edit cannot
-    // rewrite the report's historical body/hash.
-    if (policy.meta.applied) {
-      next.policySnapshot = {version: policy.meta.version, sha256: policy.meta.sha256, text: policy.text};
-    }
-    next.rounds.push({
-      roundId,
-      number: next.rounds.length + 1,
+    const prepared = await tasks.prepareRun(t.id, {
       prompt: userPrompt,
-      startedAt: new Date().toISOString(),
       maxTokens,
       effort,
-      policy: policy.meta,
+      policy,
     });
-    save(next);
-    event(next, {kind: 'round_started', roundId, number: next.rounds.length, maxTokens, effort});
+    const {task: next, roundId} = prepared;
     try {
       runtime.openRound(next, {
         roundId,

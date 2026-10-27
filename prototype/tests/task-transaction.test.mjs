@@ -175,3 +175,109 @@ test('a failed force-exit leaves the runtime handle and status for manual recove
     fs.rmSync(root, {recursive: true, force: true});
   }
 });
+
+test('prepareRun waits at the release gate before numbering and saving the next round', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, (file, value) => {
+      fs.mkdirSync(path.dirname(file), {recursive: true});
+      fs.writeFileSync(file, JSON.stringify(value));
+    });
+    const task = {
+      id: 'task-0123456789ab',
+      status: 'awaiting_review',
+      rounds: [{number: 1, roundId: 'round-1'}],
+      acceptance: {evidence: 'old'},
+      reportHash: 'old-hash',
+    };
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    let release;
+    const records = new Map([[task.id, {
+      phase: 'finished',
+      w: {},
+    }]]);
+    const runtime = memoryRuntime(records);
+    runtime.createRoundId = () => 'round-00000000-0000-4000-8000-000000000002';
+    runtime.waitForRelease = async () => {
+      await new Promise(resolve => { release = resolve; });
+      repository.remember({...repository.peek(task.id), output: 'latest-result'});
+      return true;
+    };
+    const events = [];
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save: value => repository.save(value),
+      event: (value, payload) => events.push({task: value, payload}),
+      acceptance: {revoke: value => ({...value, acceptance: null, reportHash: null})},
+    });
+
+    const pending = transaction.prepareRun(task.id, {
+      prompt: 'second',
+      maxTokens: 2048,
+      effort: 'high',
+      policy: {meta: {applied: true, version: 1, sha256: 'policy-hash'}, text: 'policy'},
+    });
+    assert.equal(repository.peek(task.id).rounds.length, 1, 'no round may appear before released');
+    release();
+    const prepared = await pending;
+    assert.equal(prepared.number, 2);
+    assert.equal(prepared.task.status, 'running');
+    assert.equal(prepared.task.output, null);
+    assert.equal(prepared.task.rounds.length, 2);
+    assert.equal(prepared.task.rounds[1].roundId, 'round-00000000-0000-4000-8000-000000000002');
+    assert.equal(prepared.task.rounds[1].prompt, 'second');
+    assert.equal(prepared.task.rounds[1].maxTokens, 2048);
+    assert.equal(prepared.task.rounds[1].effort, 'high');
+    assert.equal(prepared.task.acceptance, null);
+    assert.equal(prepared.task.reportHash, null);
+    assert.deepEqual(prepared.task.policySnapshot, {
+      version: 1,
+      sha256: 'policy-hash',
+      text: 'policy',
+    });
+    assert.equal(events.at(-1).payload.kind, 'round_started');
+    assert.equal(events.at(-1).payload.number, 2);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('prepareRun refuses a running task and an un-released previous runtime without mutation', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, (file, value) => {
+      fs.mkdirSync(path.dirname(file), {recursive: true});
+      fs.writeFileSync(file, JSON.stringify(value));
+    });
+    const running = {id: 'task-0123456789ab', status: 'running', rounds: [{number: 1}]};
+    repository.remember(running);
+    fs.mkdirSync(path.join(root, 'runs', running.id), {recursive: true});
+    const runtime = memoryRuntime();
+    let saved = 0;
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save: value => { saved += 1; return repository.save(value); },
+      acceptance: {revoke: value => ({...value, acceptance: null, reportHash: null})},
+    });
+    await assert.rejects(
+      () => transaction.prepareRun(running.id, {prompt: 'next', maxTokens: 1024}),
+      /already running/,
+    );
+    assert.equal(saved, 0);
+
+    running.status = 'awaiting_review';
+    runtime.records.set(running.id, {phase: 'finished', w: {}});
+    runtime.waitForRelease = async () => false;
+    await assert.rejects(
+      () => transaction.prepareRun(running.id, {prompt: 'next', maxTokens: 1024}),
+      /previous runtime exited before releasing/,
+    );
+    assert.equal(saved, 0);
+    assert.equal(repository.peek(running.id).rounds.length, 1);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
