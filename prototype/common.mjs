@@ -145,10 +145,15 @@ export function cleanEnvironment(temp) {
 export function readToken() {
   return fs.readFileSync(path.join(RUNTIME, 'server-token'), 'utf8').trim();
 }
-export async function request(action, args={}) {
+export async function request(action, args={}, options={}) {
+  const waitSeconds = ['wait', 'research_wait'].includes(action) &&
+    Number.isSafeInteger(args.timeoutSeconds) ? args.timeoutSeconds : 30;
+  const timeoutMs = options.timeoutMs ?? (['wait', 'research_wait'].includes(action)
+    ? Math.min((waitSeconds + 15) * 1000, 2_147_483_647)
+    : 45000);
   const r = await fetch(`http://127.0.0.1:${config.port}/api`, {
     method:'POST', headers:{'content-type':'application/json', authorization:`Bearer ${readToken()}`},
-    body:JSON.stringify({action,args}), signal:AbortSignal.timeout(45000),
+    body:JSON.stringify({action,args}), signal:AbortSignal.timeout(timeoutMs),
   });
   const value = await r.json();
   // Only HTTP failure is a transport/protocol failure. A normal 200 task

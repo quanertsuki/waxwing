@@ -4,6 +4,7 @@
   "node": "",
   "root": "../data",
   "providersDir": "../data/providers",
+  "researchRoot": "../data-research",
   "defaultProvider": "dsh-sdk",
   "fallbackProvider": "dsh-sdk"
 }

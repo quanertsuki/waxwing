@@ -12,6 +12,8 @@ statistics on the local machine.
   `run -> ack -> events/heartbeat -> result|error -> released`.
 - Git repositories get isolated worktrees by default; non-Git directories use
   explicit shared-workspace locks.
+- One read-only research question can fan out to multiple execution Agents,
+  each with a separate scratch workspace and one aggregate report.
 - Status exposes bounded workspace, diff, log, report, usage, and history views.
 - Request, tool-loop, and cost limits are opt-in and disabled by default.
 - Waxwing data lives under the per-user Waxwing directory, with copy-only

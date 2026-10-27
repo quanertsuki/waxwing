@@ -45,7 +45,21 @@ test('waxwing_status exposes all bounded pagination views',()=>{
   assert.match(tool('waxwing_status').description,/summary/i);
   assert.match(tool('waxwing_status').description,/result/i);
   assert.match(tool('waxwing_status').description,/diff/i);
-  assert.equal(catalogue.length,22,'11 public tools plus 11 legacy aliases');
+  assert.deepEqual(tool('waxwing_wait').inputSchema.properties.timeoutSeconds,{
+    type:'integer',minimum:1,maximum:300,default:30,
+  });
+  assert.equal(catalogue.length,34,'17 public tools plus 17 legacy aliases');
+});
+test('research tools expose batch fan-out, status, collection, and cancellation',()=>{
+  const start=tool('waxwing_research_start');
+  assert.deepEqual(start.inputSchema.required,['question','shards']);
+  assert.equal(start.inputSchema.properties.shards.type,'array');
+  assert.equal(start.inputSchema.properties.shards.minItems,1);
+  assert.deepEqual(start.inputSchema.properties.shards.items.required,['subject']);
+  assert.equal(tool('waxwing_research_status').annotations.readOnlyHint,true);
+  assert.equal(tool('waxwing_research_wait').annotations.readOnlyHint,true);
+  assert.equal(tool('waxwing_research_cancel').annotations.destructiveHint,true);
+  assert.ok(tool('ds_research_collect'),'legacy research alias remains available in 0.1.x');
 });
 test('MCP leaves an omitted view to the manager summary default and forwards pagination',async()=>{
   const calls=[];
@@ -72,6 +86,26 @@ test('Waxwing tool names forward to the same actions as legacy aliases',async()=
     {name:'cleanup_worktree',args:{id:'task-0123456789ab'}},
   ]);
 });
+test('wait tools forward bounded server-side waits',async()=>{
+  const calls=[];
+  const io={ensureServer:async()=>{},request:async(name,args)=>{calls.push({name,args});return {wait:{timedOut:false}};}};
+  const invokeTool=(name,args)=>handle({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},io);
+  assert.equal((await invokeTool('waxwing_wait',{id:'task-0123456789ab',timeoutSeconds:20})).result.isError,undefined);
+  assert.equal((await invokeTool('ds_research_wait',{id:'research-0123456789ab'})).result.isError,undefined);
+  assert.deepEqual(calls,[
+    {name:'wait',args:{id:'task-0123456789ab',timeoutSeconds:20}},
+    {name:'research_wait',args:{id:'research-0123456789ab'}},
+  ]);
+});
+test('research_start forwards a valid batch without adding limits',async()=>{
+  const calls=[];
+  const io={ensureServer:async()=>{},request:async(name,args)=>{calls.push({name,args});return {id:'research-0123456789ab'};}};
+  const args={question:'Compare projects',shards:[{subject:'Alpha'},{subject:'Beta',url:'https://example.invalid/beta'}],provider:'magpie'};
+  const response=await handle({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'waxwing_research_start',arguments:args}},io);
+  assert.equal(response.result.isError,undefined);
+  assert.deepEqual(calls,[{name:'research_start',args}]);
+  assert.equal(calls[0].args.usageLimits,undefined);
+});
 test('MCP rejects invalid status views and pagination before contacting the manager',async()=>{
   let called=0;
   const io={ensureServer:async()=>{called++;},request:async()=>{called++;return {};}};
@@ -88,6 +122,7 @@ test('tools/list returns the full catalogue',async()=>{
 test('initialize tells the delegating Agent to use summaries and read results on demand',async()=>{
   const response=await handle({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-03-26'}});
   assert.match(response.result.instructions,/summary/i);
+  assert.match(response.result.instructions,/wait/i);
   assert.match(response.result.instructions,/view=result/i);
   assert.match(response.result.instructions,/offset\/limit/i);
   assert.ok(response.result.instructions.length<=450,`instructions length ${response.result.instructions.length}`);
@@ -106,7 +141,7 @@ test('MCP rejects every non-integer budget before contacting the manager',async(
 test('MCP still enforces required and unknown arguments',async()=>{
   const missing=await call('ds_create',{maxTokens:1024});
   assert.equal(missing.result.isError,true);
-  assert.match(missing.result.content[0].text,/Missing string argument workspace/);
+  assert.match(missing.result.content[0].text,/Missing argument workspace/);
   const unknown=await call('ds_create',{workspace:'./example',prompt:'p',bogus:1});
   assert.equal(unknown.result.isError,true);
   assert.match(unknown.result.content[0].text,/Invalid argument bogus/);

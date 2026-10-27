@@ -725,7 +725,7 @@ test('CLI JSON passes the new fields through and help documents them',()=>{
 });
 
 test('MCP exposes Waxwing tools plus legacy aliases and forwards usage fields',async()=>{
-    assert.equal(catalogue.length,22);
+  assert.equal(catalogue.length,34);
     const createTool=catalogue.find(tool=>tool.name==='ds_create');
     const reworkTool=catalogue.find(tool=>tool.name==='ds_rework');
     assert.equal(createTool.inputSchema.properties.usageLimits.type,'object');

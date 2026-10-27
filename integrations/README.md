@@ -19,6 +19,12 @@ Restart Codex and look for the `waxwing` server. Public tools use the
 `waxwing_*` prefix. The `ds_*` catalogue remains available as a `0.1.x`
 compatibility alias.
 
+For a fan-out across several read-only sources, call
+`waxwing_research_start`, block once with `waxwing_research_wait`, and then use
+`waxwing_research_collect`. Research shards run in separate scratch
+workspaces; multiple execution Agents must not write concurrently in one
+physical project directory.
+
 ## Claude Code
 
 Merge [`mcp.json`](mcp.json) into Claude Code's MCP configuration, or use:

@@ -7,7 +7,9 @@ export {
   main,
   nextWaitDelay,
   parseCommandArgs,
+  parseResearchCollectArgs,
   parseStatusArgs,
+  parseWaitArgs,
   wait,
   waitTimeoutMs,
 } from '../../prototype/cli.mjs';

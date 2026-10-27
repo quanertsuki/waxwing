@@ -28,6 +28,8 @@ multi-tenant service.
   rework are ordered by an explicit `roundId` protocol.
 - **Workspace isolation.** Clean Git repositories automatically run in sibling
   worktrees; non-Git directories use an exclusive shared lock.
+- **Parallel research fan-out.** One batch can send many read-only source
+  investigations to separate execution Agents, then collect one cited report.
 - **Unlimited by default.** Request counts, tool loops, and cost limits are not
   blocked unless you explicitly configure a threshold.
 - **Bounded APIs.** Default CLI/MCP responses stay small; results, reports,
@@ -121,6 +123,8 @@ Example `task.json`:
 ### 3. Inspect, verify, rework, accept
 
 ```bash
+waxwing wait task-xxxxxxxxxxxx
+waxwing wait task-xxxxxxxxxxxx --timeout 300
 waxwing status task-xxxxxxxxxxxx
 waxwing status task-xxxxxxxxxxxx --view result
 waxwing status task-xxxxxxxxxxxx --view report
@@ -134,8 +138,61 @@ waxwing close task-xxxxxxxxxxxx
 Available paginated views: `result`, `history`, `usage`, `report`, `workspace`,
 `diff`, and `log`. Use `--offset` and `--limit` for large output.
 
+`wait` is one server-side blocking call. It returns as soon as the task stops
+running, or returns the current bounded summary with `wait.timedOut: true` when
+the timeout expires. The default follows `roundTimeoutSeconds + 30`.
+
 Acceptance evidence must describe checks actually performed by the delegating
 party, not a restatement of the worker’s claim.
+
+### 4. Fan out read-only research
+
+Use a research batch when one delegating Agent needs several articles, web
+pages, or repositories examined in parallel. Every shard gets its own scratch
+workspace, so shards can run concurrently without writing into the source
+project or into each other’s files.
+
+`research.json`:
+
+```json
+{
+  "title": "Compare candidate projects",
+  "question": "Which project is the better fit, and why?",
+  "commonPrompt": "Cite sources and state uncertainty.",
+  "shards": [
+    {
+      "id": "alpha",
+      "subject": "Analyze Project Alpha",
+      "url": "https://github.com/example/alpha",
+      "focus": "architecture and license"
+    },
+    {
+      "id": "beta",
+      "subject": "Analyze Project Beta",
+      "url": "https://github.com/example/beta",
+      "focus": "maintenance and test coverage"
+    }
+  ]
+}
+```
+
+```bash
+waxwing research-start @research.json
+waxwing research-wait research-xxxxxxxxxxxx
+waxwing research-status research-xxxxxxxxxxxx
+waxwing research-collect research-xxxxxxxxxxxx
+```
+
+`research-wait` waits for the whole batch in one call and also accepts
+`--timeout`. Waxwing closes successful shard runtimes automatically and keeps partial
+results when another shard fails. `research-collect` writes an aggregate report
+under `<WAXWING_HOME>/reports`; pagination uses `--offset` and `--limit`.
+Scratch workspaces default to `<WAXWING_HOME>-research` and can be moved with
+`WAXWING_RESEARCH_ROOT`.
+
+Research batches are for reading and synthesis. Multiple execution Agents must
+not write concurrently in the same physical project directory. For write work,
+use one task per isolated worktree or serialize changes through `shared`.
 
 ## MCP
 
@@ -149,8 +206,11 @@ Public tools use the `waxwing_*` prefix. The complete `ds_*` catalogue remains
 available throughout `0.1.x` for compatibility and is scheduled for removal no
 earlier than `0.2.0`.
 
-Core tools include `create`, `list`, `status`, `rework`, `accept`, `cancel`,
-`close`, `cleanup_worktree`, `export`, `preview_delete`, and `delete`.
+Core tools include `create`, `list`, `status`, `wait`, `rework`, `accept`, `cancel`,
+`close`, `cleanup_worktree`, `export`, `preview_delete`, and `delete`. Research
+fan-out uses `waxwing_research_start`, `waxwing_research_status`,
+`waxwing_research_wait`, `waxwing_research_collect`, and
+`waxwing_research_cancel`.
 
 ## Desktop
 
@@ -219,6 +279,7 @@ Common environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `WAXWING_HOME` | Per-user data root |
+| `WAXWING_RESEARCH_ROOT` | Parent directory for per-shard research workspaces |
 | `WAXWING_CONFIG` | Main configuration file |
 | `WAXWING_LOCAL_CONFIG` | Local override file |
 | `WAXWING_NODE` | Node executable for workers |

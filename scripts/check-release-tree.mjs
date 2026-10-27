@@ -41,15 +41,18 @@ const required = [
   'prototype/server.mjs',
   'src/acceptance/service.mjs',
   'src/app.mjs',
+  'src/research/service.mjs',
+  'src/runtime/module.mjs',
   'src/runtime/protocol.mjs',
   'src/runtime/supervisor.mjs',
+  'src/tasks/change-notifier.mjs',
   'src/workspace/lease-manager.mjs',
 ];
 
 const forbiddenRoots =
   /^(?:dispatch|handoffs|acceptance|research|data|logs|runtime|node_modules|dist|target|\.codegraph|\.local-archive)(?:\/|$)/i;
 const forbiddenAnywhere =
-  /(?:^|\/)(?:node_modules|target|dist|\.codegraph|\.local-archive)(?:\/|$)/i;
+  /(?:^|\/)(?:node_modules|target|dist|\.codegraph|\.local-archive)(?:\/|$)|(?:^|\/)(?:.*\.bak(?:[-.].*)?|final-suite\.txt|npm-final(?:\.cmd|\.txt)?|npmtest[^/]*\.txt|rm-out\.txt|tmp-[^/]+)$/i;
 const forbiddenSecret =
   /(?:^|\/)(?:\.env(?:\..*)?|server-token|.*\.credentials.*|.*\.grant\.json|.*\.(?:pem|key|p12|pfx))$/i;
 const textExtensions = new Set([

@@ -12,7 +12,8 @@ export const WAIT_INITIAL_MS=1000, WAIT_MAX_MS=10000, WAIT_GRACE_MS=30000;
 export const waitTimeoutMs=()=>config.roundTimeoutSeconds*1000+WAIT_GRACE_MS;
 export const nextWaitDelay=previous=>Math.min(previous*2,WAIT_MAX_MS);
 export const HELP_TEXT=(
-  'waxwing [tui | demo | health | list | status ID [--view summary|result|history|usage|report|workspace|diff|log] [--offset N --limit N] | wait ID | ' +
+  'waxwing [tui | demo | health | list | status ID [--view summary|result|history|usage|report|workspace|diff|log] [--offset N --limit N] | wait ID [--timeout N] | ' +
+  'research-start JSON | research-status BATCH_ID | research-wait BATCH_ID [--timeout N] | research-collect BATCH_ID [--offset N --limit N] | research-cancel BATCH_ID | ' +
   'create JSON | rework JSON | accept JSON | cancel ID | close ID | cleanup-worktree ID | export ID | preview-delete ID | grant-delete ID | delete ID | shutdown]\n' +
   'JSON 参数也可用 @绝对文件路径。create/rework 可选数值 maxTokens（正安全整数，单次请求输出上限；rework 省略则继承上一轮预算，下一轮生效）。' +
   'create/rework 可选 effort high|max（推理强度，默认 high；rework 省略则继承任务当前值，下一轮生效；反复失败时可升到 max）。' +
@@ -20,7 +21,7 @@ export const HELP_TEXT=(
   'rework 亦可传 usageLimits 调整后续轮次上限。主动启用并达到上限时，rework 需要 overrideLimits:true 和非空 overrideReason（最多 1000 字符）。' +
   '默认 list/status/变更操作返回有界摘要；完整结果用 status --view result，完整历史用 --view history，用量与费用明细用 --view usage，均可用 offset/limit 分页读取。' +
   'create 可选 workspaceMode auto|worktree|shared；auto 对干净 Git 仓库创建隔离 worktree，对非 Git 目录使用共享锁，脏仓库必须显式选择 shared。' +
-  'wait 按 1→2→4→8→10 秒退避，截止时间为 roundTimeoutSeconds + 30 秒。MCP：waxwing-mcp 或 node prototype/mcp.mjs'
+  'wait/research-wait 在管理器内阻塞等待，默认截止时间为 roundTimeoutSeconds + 30 秒，可用 --timeout 调整。MCP：waxwing-mcp 或 node prototype/mcp.mjs'
 );
 
 /**
@@ -29,7 +30,7 @@ export const HELP_TEXT=(
  * new field again, including when the HTTP surface is called directly.
  */
 export function parseCommandArgs(command,args) {
-  if(['create','rework','accept'].includes(command)) {
+  if(['create','rework','accept','research_start'].includes(command)) {
     const value=args.join(' ');
     return {command,data:JSON.parse(value.startsWith('@')?fs.readFileSync(value.slice(1),'utf8'):value)};
   }
@@ -37,27 +38,41 @@ export function parseCommandArgs(command,args) {
 }
 
 /**
- * Poll the bounded status summary with 1→2→4→8→10s backoff. The default
- * deadline follows roundTimeoutSeconds (plus a small grace for the manager's
- * own stop/reap path) instead of a hard-coded 650 seconds. A terminal poll
- * returns only the summary; full results are an explicit view=result read.
+ * Use one server-side wait instead of a manual status loop. The default
+ * deadline follows roundTimeoutSeconds plus a small grace for the manager's
+ * exit-confirmation path.
  */
 export async function wait(id,options={}) {
-  const timeout=options.timeoutMs ?? waitTimeoutMs();
-  const status=options.requestStatus ?? (taskId=>request('status',{id:taskId}));
-  const sleep=options.sleep ?? (ms=>new Promise(r=>setTimeout(r,ms)));
-  const clock=options.now ?? (()=>Date.now());
-  const started=clock();
-  let delay=WAIT_INITIAL_MS;
-  while(clock()-started<timeout) {
-    const t=await status(id);
-    if(!['running','stopping'].includes(t.status))return t;
-    const remaining=timeout-(clock()-started);
-    if(remaining<=0)break;
-    await sleep(Math.min(delay,remaining));
-    delay=nextWaitDelay(delay);
+  const timeoutSeconds=options.timeoutSeconds ??
+    Math.max(1,Math.ceil((options.timeoutMs ?? waitTimeoutMs())/1000));
+  const requestWait=options.requestWait ?? (args=>request('wait',args));
+  return requestWait({id,timeoutSeconds});
+}
+
+/** Parse `wait ID [--timeout SECONDS]` for task and research waits. */
+export function parseWaitArgs(args,label='wait') {
+  const [id,...rest]=args;
+  if(!id)throw new Error(`${label} requires an ID`);
+  const data={id};
+  for(let i=0;i<rest.length;i++) {
+    const token=rest[i],eq=token.indexOf('='),name=token.slice(2,eq<0?undefined:eq);
+    if(!token.startsWith('--'))throw new Error(`Unexpected ${label} argument ${token}`);
+    if(name!=='timeout')throw new Error(`Unknown ${label} option --${name}`);
+    if(data.timeoutSeconds!==undefined)throw new Error(`Duplicate ${label} option --timeout`);
+    let value;
+    if(eq>=0)value=token.slice(eq+1);
+    else {
+      if(i+1>=rest.length)throw new Error('Missing value for --timeout');
+      value=rest[++i];
+    }
+    if(!/^\d+$/.test(value))throw new Error('timeout must be a positive integer');
+    const seconds=Number(value);
+    if(!Number.isSafeInteger(seconds)||seconds<1||seconds>86400) {
+      throw new Error('timeout must be an integer between 1 and 86400 seconds');
+    }
+    data.timeoutSeconds=seconds;
   }
-  throw new Error('Wait timed out; task remains managed; status/cancel are available');
+  return data;
 }
 
 /** Parse `status ID [--view summary|result|history|usage] [--offset N --limit N]`. */
@@ -97,6 +112,14 @@ export function parseStatusArgs(args) {
   if((data.offset!==undefined||data.limit!==undefined)&&!['result','history','usage','report','workspace','diff','log'].includes(data.view)) {
     throw new Error('--offset/--limit require --view result, history, usage, report, workspace, diff, or log');
   }
+  return data;
+}
+/** Parse `research-collect BATCH_ID [--offset N --limit N]`. */
+export function parseResearchCollectArgs(args) {
+  const [id,...rest]=args;
+  if(!id)throw new Error('research-collect requires a batch ID');
+  const parsed=parseStatusArgs([id,'--view','result',...rest]);
+  const {view,...data}=parsed;
   return data;
 }
 async function authorize(id,rl) {
@@ -178,8 +201,21 @@ export async function main() {
   await ensureServer();
   if(!command || command==='tui'){await tui();return;}
   if(command==='demo'){await demo();return;}
-  if(command==='wait'){if(!args[0])throw new Error('wait requires a task ID');out(await wait(args[0]));return;}
+  if(command==='wait') {
+    const data=parseWaitArgs(args);
+    out(await wait(data.id,{timeoutSeconds:data.timeoutSeconds}));
+    return;
+  }
   if(command==='status'){out(await request('status',parseStatusArgs(args)));return;}
+  if(command==='research-wait') {
+    const data=parseWaitArgs(args,'research-wait');
+    out(await request('research_wait',{
+      ...data,
+      timeoutSeconds:data.timeoutSeconds ?? Math.max(1,Math.ceil(waitTimeoutMs()/1000)),
+    }));
+    return;
+  }
+  if(command==='research-collect'){out(await request('research_collect',parseResearchCollectArgs(args)));return;}
   if(command==='cleanup-worktree'){if(!args[0])throw new Error('cleanup-worktree requires a task ID');out(await request('cleanup_worktree',{id:args[0]}));return;}
   if(command==='grant-delete') {
     const rl=readline.createInterface({input:stdin,output:stdout});

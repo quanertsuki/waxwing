@@ -12,9 +12,11 @@ flowchart LR
 
   subgraph Manager["Local manager: single state owner"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
-    Runtime["RuntimeSupervisor<br/>round gate + heartbeat + recovery"]
+    Runtime["Runtime<br/>round IDs + heartbeat + recovery"]
+    Supervisor["RuntimeSupervisor<br/>release + exit gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
     Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
+    Research["ResearchBatchService<br/>parallel scratch shards + report"]
     Usage["UsageService<br/>metrics; limits opt-in"]
     Providers["ProviderRegistry<br/>DSH SDK + OpenAI-compatible"]
   end
@@ -23,6 +25,7 @@ flowchart LR
   Protocol["Round protocol<br/>run -> ack -> events -> released"]
   Tools["Tool loop<br/>unlimited requests by default"]
   Workspace["Shared workspace<br/>or isolated Git worktree"]
+  Scratch["Research scratch workspaces<br/>one directory per shard"]
   DSH["DeepSeek Harness"]
   API["OpenAI-compatible API"]
   Data[("Per-user data directory<br/>runs / runtime / reports")]
@@ -39,11 +42,16 @@ flowchart LR
 
   Gateway --> Tasks
   Gateway --> Acceptance
+  Gateway --> Research
   Gateway --> Usage
   Tasks <--> Runtime
+  Runtime --> Supervisor
   Tasks <--> Lease
   Tasks <--> Data
   Acceptance --> Data
+  Research --> Tasks
+  Research --> Scratch
+  Research --> Data
   Runtime --> Data
 
   Runtime --> Protocol
@@ -53,6 +61,7 @@ flowchart LR
   Providers --> API
   Worker --> Tools
   Tools --> Workspace
+  Worker --> Scratch
   Lease <--> Workspace
 
   Legacy -. forwards to .-> Gateway

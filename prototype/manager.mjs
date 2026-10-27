@@ -13,17 +13,13 @@ import {budgetFileFor, parseOptionalMaxTokens, resolveRoundBudget} from './budge
 import {DEFAULT_EFFORT, parseOptionalEffort, resolveRoundEffort} from './effort.mjs';
 import {usageForTask,usageForList,usageForView} from '../src/usage/service.mjs';
 import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
-import {
-  DEFAULT_ACK_TIMEOUT_MS,
-  HEARTBEAT_STALE_MS,
-  createRoundId,
-  isRoundId,
-} from '../src/runtime/protocol.mjs';
+import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
-import {RuntimeSupervisor} from '../src/runtime/supervisor.mjs';
 import {TaskRepository} from '../src/tasks/repository.mjs';
+import {ChangeNotifier} from '../src/tasks/change-notifier.mjs';
 import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
-import {previewTaskDeletion, reportContent, writeTaskReport} from '../src/acceptance/service.mjs';
+import {AcceptanceService} from '../src/acceptance/service.mjs';
+import {ResearchBatchService} from '../src/research/service.mjs';
 
 const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/');
 
@@ -35,6 +31,9 @@ const ERROR_LIMIT = 240;
 const PREVIEW_LIMIT = 400;
 const DEFAULT_PAGE_LIMIT = 2000;
 const MAX_PAGE_LIMIT = 4000;
+const DEFAULT_WAIT_SECONDS = 30;
+const MAX_WAIT_SECONDS = 86400;
+const ACTIVE_TASK = new Set(['created', 'running', 'stopping']);
 const STATUS_VIEWS = ['summary', 'result', 'history', 'usage', 'report', 'workspace', 'diff', 'log'];
 const USAGE_LIMIT_FIELDS = ['enabled', 'warnCostCny', 'blockCostCny', 'warnRequests', 'blockRequests'];
 const COST_LIMIT_FIELDS = ['warnCostCny', 'blockCostCny'];
@@ -275,6 +274,14 @@ function statusQuery(a) {
   const limit = a.limit === undefined ? DEFAULT_PAGE_LIMIT : safePageLimit(a.limit);
   return {view, offset, limit};
 }
+function parseWaitSeconds(value) {
+  if (value === undefined) return DEFAULT_WAIT_SECONDS;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) ||
+      value < 1 || value > MAX_WAIT_SECONDS) {
+    throw new Error(`timeoutSeconds must be an integer between 1 and ${MAX_WAIT_SECONDS}`);
+  }
+  return value;
+}
 
 /**
  * Build one manager instance owning its own task/worker/authorization maps.
@@ -286,23 +293,43 @@ function statusQuery(a) {
 export function createManager(options = {}) {
   ensureDirs();
   const repository = new TaskRepository({runsDir: RUNS, atomicJson});
-  const workers = new Map(), grants = new Map();
+  // Reports, hashes, preview fingerprints, and human grants belong to the
+  // Acceptance module. The manager only injects the data directories.
+  const acceptance = new AcceptanceService({reportsDir: REPORTS, grantsDir: RUNTIME});
   const eventSequences = new Map();
-  const runtimeSupervisor = new RuntimeSupervisor();
+  const taskChanges = new ChangeNotifier();
   const workspaceLeases = new WorkspaceLeaseManager({
     defaultMode: config.workspaceMode ?? 'auto',
     worktreeContainerName: config.worktreeContainerName
       ?? config.worktreeParentName
       ?? '.waxwing-worktrees',
   });
-  const digest = text => createHash('sha256').update(text).digest('hex');
+  const research = new ResearchBatchService({
+    batchesDir: path.join(ROOT, 'research'),
+    scratchRoot: config.researchRoot,
+    reportsDir: REPORTS,
+    atomicJson,
+    createTask: input => createTask(input),
+    getTask: id => repository.peek(id) ?? null,
+    closeTask: id => stop(id, true),
+    cancelTask: id => stop(id, false),
+    waitForTaskChanges: (ids, timeoutMs) => taskChanges.wait(ids, timeoutMs),
+    canCloseTask: id => {
+      const rec = workers.get(id);
+      return !rec || rec.phase === 'idle';
+    },
+  });
   let shuttingDown = false;
 
   const directory = id => repository.directory(id);
   const get = id => repository.get(id);
-  const save = task => repository.save(task);
+  const save = task => {
+    const saved = repository.save(task);
+    taskChanges.touch(task.id);
+    return saved;
+  };
   function fullView(t) {
-    return {...t, live: workers.has(t.id), cleanupAuthorized: grants.has(t.id),
+    return {...t, live: workers.has(t.id), cleanupAuthorized: acceptance.hasGrant(t.id),
       dataDirectory: directory(t.id), report: path.join(REPORTS, `${t.id}.md`),
       runtime: t.runtime ?? null};
   }
@@ -351,15 +378,11 @@ export function createManager(options = {}) {
    */
   function baseReworkBlockedReason(t) {
     if (shuttingDown) return 'Manager is shutting down; rework is refused';
-    if (t.status === 'closed') return 'Task is closed; create a new task for follow-up work';
-    if (t.status === 'accepted') return 'Task is accepted; create a new task for follow-up work';
-    if (t.status === 'running') return 'Task is running; wait for the round to finish or cancel it';
     const rec = workers.get(t.id);
-    // During a normal stop the status is already "stopping" and the owned
-    // runtime is closing; mention both so callers do not mistake the window for
-    // a released workspace.
-    if (rec?.closing) return 'Task is stopping; runtime is closing; wait for exit confirmation';
-    if (t.status === 'stopping') return 'Task is stopping; wait for runtime exit confirmation';
+    // closed / accepted / running / stopping preconditions are the Acceptance
+    // module's policy; runtime, round, and workspace reasons stay here.
+    const acceptanceRefusal = acceptance.reworkRefusal(t, {closing: Boolean(rec?.closing)});
+    if (acceptanceRefusal) return acceptanceRefusal;
     if (rec?.unreworkableReason) return rec.unreworkableReason;
     if (t.rounds.length >= config.maxRounds) return `Maximum ${config.maxRounds} rounds reached; create a new task for further work`;
     if (!rec && t.rounds.length > 0) {
@@ -544,7 +567,7 @@ export function createManager(options = {}) {
       workspace: t.workspace,
       maxTokens: effectiveMaxTokens(t),
       accepted: Boolean(t.acceptance),
-      cleanupAuthorized: grants.has(t.id),
+      cleanupAuthorized: acceptance.hasGrant(t.id),
       provider: t.provider?.name,
       model: t.model,
       error: t.error ? error.text : null,
@@ -553,6 +576,11 @@ export function createManager(options = {}) {
       updatedAt: t.updatedAt,
       usage,
     };
+    if (t.kind === 'research') {
+      item.kind = 'research';
+      item.batchId = t.batchId ?? null;
+      item.shardId = t.shardId ?? null;
+    }
     // Status has a bounded result preview; only list needs the prompt summary.
     // Keeping it out of status avoids duplicating similar text in mutation
     // responses and keeps those payloads below the communication size target.
@@ -623,6 +651,29 @@ export function createManager(options = {}) {
       // view=usage still exposes every event-only or empty round.
       usageRounds: snapshot.usageRounds.filter(round => round.requests > 0),
     };
+  }
+  /** Hold one HTTP/MCP call until the task stops running or the wait expires. */
+  async function waitForTask(a) {
+    const timeoutSeconds = parseWaitSeconds(a.timeoutSeconds);
+    const startedAt = Date.now();
+    const timeoutMs = timeoutSeconds * 1000;
+    for (;;) {
+      const task = get(a.id);
+      if (!ACTIVE_TASK.has(task.status)) {
+        return {
+          ...statusSummary(task),
+          wait: {timedOut: false, timeoutSeconds, waitedMs: Date.now() - startedAt},
+        };
+      }
+      const remaining = timeoutMs - (Date.now() - startedAt);
+      if (remaining <= 0) {
+        return {
+          ...statusSummary(task),
+          wait: {timedOut: true, timeoutSeconds, waitedMs: Date.now() - startedAt},
+        };
+      }
+      await taskChanges.wait([task.id], remaining);
+    }
   }
   /** Latest-round raw result, one paginated page at a time. */
   function resultPage(t, offset, limit) {
@@ -706,7 +757,7 @@ export function createManager(options = {}) {
     return {id: t.id, view: 'log', path: file, ...pageOf(content, offset, limit)};
   }
   function reportPage(t, offset, limit) {
-    const content = reportContent(t, {policySection: policyReportSection(t)});
+    const content = acceptance.content(t, {policySection: policyReportSection(t)});
     return {id: t.id, view: 'report', ...pageOf(content, offset, limit)};
   }
   function event(t, data) {
@@ -729,7 +780,6 @@ export function createManager(options = {}) {
     t.lastEventSequence = sequence;
     return record;
   }
-  function grantFile(id) { return path.join(RUNTIME, `${id}.grant.json`); }
   function restoreTasks() {
     for (const name of fs.readdirSync(RUNS)) {
       if (!/^task-[a-f0-9]{12}$/.test(name)) continue;
@@ -806,8 +856,9 @@ export function createManager(options = {}) {
           : 'Manager restarted; the old runtime is no longer reusable, so inspect the workspace and create a new task for follow-up work';
       }
       save(t);
-      if (fs.existsSync(grantFile(t.id))) grants.set(t.id, JSON.parse(fs.readFileSync(grantFile(t.id), 'utf8')));
+      acceptance.restoreGrant(t.id);
     }
+    research.restore();
   }
   function patchFor(t) {
     // No credential copying. Runtime reads the configured credential store.
@@ -863,290 +914,149 @@ export function createManager(options = {}) {
     t.runtime = record;
     return record;
   }
-  function clearAckTimer(rec) {
-    if (rec.ackTimer) clearTimeout(rec.ackTimer);
-    rec.ackTimer = null;
-  }
-  function clearRuntimeMonitors(rec) {
-    clearAckTimer(rec);
-    if (rec.timer) clearTimeout(rec.timer);
-    rec.timer = null;
-    if (rec.heartbeatWatch) clearInterval(rec.heartbeatWatch);
-    rec.heartbeatWatch = null;
-  }
-  function noteIgnored(current, rec, msg, reason) {
-    try {
-      event(current, {
-        kind: 'runtime_message_ignored',
-        messageKind: msg?.kind ?? null,
-        messageRoundId: msg?.roundId ?? null,
-        expectedRoundId: rec.roundId,
-        reason,
-      });
-    } catch {}
-  }
-  function updateRuntimeHealth(t, rec, health, detail = null) {
-    if (rec.health === health) return;
-    rec.health = health;
-    t.runtimeHealth = health;
-    persistRuntimeRecord(t, rec, detail ? {healthDetail: detail} : {});
-    try {
-      event(t, {kind: 'runtime_health', health, detail});
-      save(t);
-    } catch {}
-  }
-  function spawnWorker(t) {
-    const ownerMarker = randomUUID();
-    const w = forkWorker(t, {ownerMarker});
-    const rec = {
-      w,
-      ownerMarker,
-      startedAt: new Date().toISOString(),
-      timer: null,
-      ackTimer: null,
-      heartbeatWatch: null,
-      closing: false,
-      closeError: null,
-      unreworkableReason: null,
-      logBytes: 0,
-      roundId: null,
-      phase: 'idle',
-      health: 'starting',
-      lastHeartbeatAt: null,
-      terminalMessage: null,
-      pendingFallback: null,
-      releaseWaiters: [],
-      rejectedRound: false,
-      identityVerified: false,
-    };
-    workers.set(t.id, rec);
-    t.runtimeHealth = rec.health;
-    try { persistRuntimeRecord(t, rec); } catch {}
-    for (const stream of [w.stdout, w.stderr]) stream?.on?.('data', chunk => {
+  /**
+   * The Runtime module owns one round. The manager injects the effects it still
+   * owns: task records, lifecycle transitions, the runtime.json projection, the
+   * process fork, and the Provider-fallback handoff that only fires after a
+   * release. No filesystem layout, Git, acceptance, or usage logic lives here.
+   */
+  const runtime = new Runtime({
+    spawn: ({task, ownerMarker}) => forkWorker(task, {ownerMarker}),
+    latest: id => repository.peek(id) ?? null,
+    event: ({task, payload}) => event(task, payload),
+    save: ({task}) => save(task),
+    transition: ({task, action}) => transition(task, action),
+    persist: ({task, rec, extra}) => persistRuntimeRecord(task, rec, extra),
+    log: ({task, rec, chunk}) => {
       if (rec.logBytes > 1024 * 1024) return;
       rec.logBytes += chunk.length;
       // Managed credentials are never read by this manager or passed in arguments.
-      fs.appendFileSync(path.join(directory(t.id), 'runtime.log'), chunk.toString().replace(/sk-[\w-]+/g, '[redacted]'));
-    });
-    w.on('message', msg => {
-      const current = repository.peek(t.id); if (!current) return;
-      if (msg.kind === 'ready') {
-        current.runtimeReady = true;
-        if (msg.ownerMarker && msg.ownerMarker !== rec.ownerMarker) {
-          rec.unreworkableReason = 'Runtime identity marker did not match; create a new task';
-          updateRuntimeHealth(current, rec, 'unhealthy', 'owner marker mismatch');
-          return;
-        }
-        rec.identityVerified = Boolean(msg.ownerMarker === rec.ownerMarker);
-        persistRuntimeRecord(current, rec, {
-          workerPid: msg.pid ?? rec.w.pid ?? null,
-          workerStartedAt: msg.startedAt ?? null,
-          identityVerified: rec.identityVerified,
-        });
-        save(current);
-        return;
-      }
-      if (msg.kind === 'worker_busy') {
-        if (msg.roundId === rec.roundId) {
-          rec.rejectedRound = true;
-          rec.unreworkableReason = 'Worker rejected a run because its previous round was not released';
-          clearAckTimer(rec);
-          const failed = current.status === 'running' ? transition(current, 'fail') : current;
-          failed.error = `Task ${t.id}: worker_busy for ${msg.roundId}; the previous round is still active`;
-          event(failed, {kind: 'worker_busy', reportedRoundId: msg.roundId});
-          updateRuntimeHealth(failed, rec, 'unhealthy', 'worker_busy');
+      fs.appendFileSync(path.join(directory(task.id), 'runtime.log'), chunk.toString().replace(/sk-[\w-]+/g, '[redacted]'));
+    },
+    untrusted: ({id, detail}) => markUntrusted(id, detail),
+    terminal: ({task, rec, message}) => settleTerminal(task, rec, message),
+    terminalMissing: ({task, rec, message}) => settleMissingTerminal(task, rec, message),
+    workerBusy: ({task, rec, message}) => settleWorkerBusy(task, rec, message),
+    released: ({fallback}) => handoffReleased(fallback),
+    ackTimeout: ({task, rec, roundId, timeoutMs}) => settleAckTimeout(task, rec, roundId, timeoutMs),
+    roundTimeout: ({rec, timeoutMs}) => stopAfterRoundTimeout(rec, timeoutMs),
+  });
+  /**
+   * Liveness facade. A live handle keeps the workspace locked, so every caller
+   * that used to read the raw handles map still reads the same truth here.
+   */
+  const workers = {
+    has: id => runtime.has(id),
+    get: id => runtime.get(id),
+    keys: () => runtime.ids(),
+  };
+  /** Persist a terminal result or error, applying first-round Provider fallback. */
+  function settleTerminal(task, rec, message) {
+    const ok = message.kind === 'result' && message.finishReason === 'completed';
+    // Task-level fallback: if the first round fails and a fallback provider
+    // exists, switch and retry. The retry itself is dispatched only from the
+    // released handoff below, never from this terminal message.
+    if (!ok && task.rounds.length === 1 && task.provider?.name !== config.fallbackProvider) {
+      const fallbackName = config.fallbackProvider;
+      if (fallbackName) {
+        try {
+          const fallbackProvider = providerByName(fallbackName);
+          event(task, {kind: 'provider_fallback', from: task.provider?.name, to: fallbackName, error: message.error || message.finishReason});
+          const round1 = task.rounds[0];
+          round1.result = {text: message.text ?? '', finishReason: message.finishReason, error: message.error || `Provider ended with ${message.finishReason}`};
+          round1.finishedAt = new Date().toISOString();
+          task.provider = fallbackProvider;
+          task.model = fallbackProvider.model || config.model;
+          const failed = transition(task, 'fail');
+          failed.error = null;
           save(failed);
-        }
-        return;
-      }
-      if (msg.kind === 'protocol_error') {
-        rec.unreworkableReason = `Worker protocol error: ${msg.error}`;
-        updateRuntimeHealth(current, rec, 'unhealthy', msg.error);
-        return;
-      }
-      if (['ack', 'heartbeat', 'event', 'result', 'error', 'released'].includes(msg.kind)) {
-        if (!isRoundId(msg.roundId) || msg.roundId !== rec.roundId) {
-          noteIgnored(current, rec, msg, 'roundId does not match the active round');
+          runtime.deferFallback(failed.id, {
+            taskId: failed.id,
+            prompt: round1.prompt,
+            maxTokens: round1.maxTokens,
+            effort: supportsEffort(fallbackProvider) ? round1.effort ?? null : null,
+            providerName: fallbackName,
+          });
           return;
+        } catch (fallbackError) {
+          // Fallback provider not found; proceed with the normal failure.
+          event(task, {kind: 'provider_fallback_failed', error: fallbackError.message});
         }
       }
-      if (msg.kind === 'ack') {
-        if (rec.phase !== 'awaiting_ack' || rec.rejectedRound) {
-          noteIgnored(current, rec, msg, 'ack arrived outside awaiting_ack');
-          return;
-        }
-        clearAckTimer(rec);
-        rec.phase = 'running';
-        rec.lastHeartbeatAt = Date.now();
-        updateRuntimeHealth(current, rec, 'healthy');
-        event(current, {kind: 'round_ack', roundId: msg.roundId});
-        save(current);
-        return;
-      }
-      if (msg.kind === 'heartbeat') {
-        if (rec.phase !== 'running') return;
-        rec.lastHeartbeatAt = Date.now();
-        if (rec.health !== 'healthy') updateRuntimeHealth(current, rec, 'healthy');
-        return;
-      }
-      if (msg.kind === 'event') {
-        if (current.status !== 'running' || !['running', 'awaiting_ack'].includes(rec.phase)) {
-          noteIgnored(current, rec, msg, 'task is not accepting round events');
-          return;
-        }
-        event(current, msg);
-        const n = msg.notification;
-        current.lastEvent = n.params?.event?.type ?? n.method;
-        current.eventCount = (current.eventCount ?? 0) + 1;
-        return;
-      }
-      if (msg.kind === 'close_error') rec.closeError = msg.error;
-      if (['result', 'error'].includes(msg.kind)) {
-        if (rec.terminalMessage) {
-          noteIgnored(current, rec, msg, 'duplicate terminal message');
-          return;
-        }
-        if (current.status !== 'running') {
-          noteIgnored(current, rec, msg, 'task is not accepting a terminal message');
-          return;
-        }
-        if (rec.phase !== 'running') {
-          noteIgnored(current, rec, msg, 'terminal message arrived before ack');
-          return;
-        }
-        clearAckTimer(rec);
-        if (rec.timer) clearTimeout(rec.timer);
-        rec.timer = null;
-        rec.phase = 'finished';
-        rec.terminalMessage = msg;
-        const ok = msg.kind === 'result' && msg.finishReason === 'completed';
-        // Task-level fallback: if first round fails and fallback provider exists, switch and retry
-        if (!ok && current.rounds.length === 1 && current.provider?.name !== config.fallbackProvider) {
-          const fallbackName = config.fallbackProvider;
-          if (fallbackName) {
-            try {
-              const fallbackProvider = providerByName(fallbackName);
-              event(current, {kind: 'provider_fallback', from: current.provider?.name, to: fallbackName, error: msg.error || msg.finishReason});
-              // Mark round 1 as failed, then retry with fallback
-              const round1 = current.rounds[0];
-              round1.result = {text: msg.text ?? '', finishReason: msg.finishReason, error: msg.error || `Provider ended with ${msg.finishReason}`};
-              round1.finishedAt = new Date().toISOString();
-              current.provider = fallbackProvider;
-              current.model = fallbackProvider.model || config.model;
-              const failed = transition(current, 'fail');
-              failed.error = null;
-              save(failed);
-              rec.pendingFallback = {
-                taskId: failed.id,
-                prompt: round1.prompt,
-                maxTokens: round1.maxTokens,
-                effort: supportsEffort(fallbackProvider) ? round1.effort ?? null : null,
-                providerName: fallbackName,
-              };
-              return;
-            } catch (fallbackError) {
-              // Fallback provider not found, proceed with normal failure
-              event(current, {kind: 'provider_fallback_failed', error: fallbackError.message});
-            }
-          }
-        }
-        const changed = transition(current, ok ? 'finish' : 'fail');
-        changed.output = msg.text ?? ''; changed.finishReason = msg.finishReason;
-        changed.error = ok ? null : (msg.error ?? `Provider ended with ${msg.finishReason}`);
-        changed.rounds.at(-1).result = {text: changed.output, finishReason: changed.finishReason, error: changed.error};
-        changed.rounds.at(-1).finishedAt = new Date().toISOString();
-        event(changed, {kind: 'round_finished', roundId: msg.roundId, status: changed.status}); save(changed);
-        return;
-      }
-      if (msg.kind === 'released') {
-        if (rec.phase === 'idle' || rec.phase === 'exited') {
-          noteIgnored(current, rec, msg, 'release arrived while runtime was idle');
-          return;
-        }
-        if (!rec.terminalMessage) {
-          const failed = current.status === 'running' ? transition(current, 'fail') : current;
-          failed.error = `Task ${t.id}: worker released ${msg.roundId} without a result or error`;
-          rec.unreworkableReason = 'Worker released a round without a terminal message';
-          event(failed, {kind: 'round_protocol_error', roundId: msg.roundId, reason: 'missing terminal message'});
-          save(failed);
-        }
-        // The protocol-error transition may have replaced this record. Re-read
-        // before persisting release metadata so an older object cannot overwrite
-        // the failure or reuse an earlier event sequence.
-        const released = repository.peek(t.id) ?? current;
-        clearRuntimeMonitors(rec);
-        rec.phase = 'idle';
-        rec.roundId = null;
-        rec.terminalMessage = null;
-        rec.rejectedRound = false;
-        rec.lastHeartbeatAt = null;
-        rec.health = 'idle';
-        released.runtimeHealth = 'idle';
-        event(released, {kind: 'round_released', roundId: msg.roundId});
-        persistRuntimeRecord(released, rec);
-        save(released);
-        runtimeSupervisor.settleRelease(rec, true);
-        const fallback = rec.pendingFallback;
-        rec.pendingFallback = null;
-        if (fallback) {
-          const failed = repository.peek(fallback.taskId);
-          if (failed) {
-            void executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort).catch(error => {
-              const latest = repository.peek(fallback.taskId);
-              if (latest && latest.status !== 'failed') {
-                const failedTask = transition(latest, 'fail');
-                failedTask.error = `Fallback to ${fallback.providerName} also failed: ${error.message}`;
-                try { save(failedTask); } catch {}
-              }
-            });
-          }
-        }
-        return;
+    }
+    const changed = transition(task, ok ? 'finish' : 'fail');
+    changed.output = message.text ?? ''; changed.finishReason = message.finishReason;
+    changed.error = ok ? null : (message.error ?? `Provider ended with ${message.finishReason}`);
+    changed.rounds.at(-1).result = {text: changed.output, finishReason: changed.finishReason, error: changed.error};
+    changed.rounds.at(-1).finishedAt = new Date().toISOString();
+    event(changed, {kind: 'round_finished', roundId: message.roundId, status: changed.status}); save(changed);
+  }
+  /** A release without a result or error is a protocol violation, not a success. */
+  function settleMissingTerminal(task, rec, message) {
+    const failed = task.status === 'running' ? transition(task, 'fail') : task;
+    failed.error = `Task ${task.id}: worker released ${message.roundId} without a result or error`;
+    event(failed, {kind: 'round_protocol_error', roundId: message.roundId, reason: 'missing terminal message'});
+    save(failed);
+  }
+  /** A busy worker means its previous round never released; fail explicitly. */
+  function settleWorkerBusy(task, rec, message) {
+    const failed = task.status === 'running' ? transition(task, 'fail') : task;
+    failed.error = `Task ${task.id}: worker_busy for ${message.roundId}; the previous round is still active`;
+    event(failed, {kind: 'worker_busy', reportedRoundId: message.roundId});
+    runtime.reportHealth(failed, rec, 'unhealthy', 'worker_busy');
+    save(failed);
+  }
+  /** Deferred Provider fallback starts only after the failed round released. */
+  function handoffReleased(fallback) {
+    if (!fallback) return;
+    const failed = repository.peek(fallback.taskId);
+    if (!failed) return;
+    void executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort).catch(error => {
+      const latest = repository.peek(fallback.taskId);
+      if (latest && latest.status !== 'failed') {
+        const failedTask = transition(latest, 'fail');
+        failedTask.error = `Fallback to ${fallback.providerName} also failed: ${error.message}`;
+        try { save(failedTask); } catch {}
       }
     });
-    w.on('error', e => {
-      markUntrusted(t.id, 'process error');
-      const cur = repository.peek(t.id); if (!cur) return;
-      const message = `Task ${t.id} worker error: ${e.message}`;
-      clearRuntimeMonitors(rec);
-      rec.phase = 'exited';
-      runtimeSupervisor.settleRelease(rec, false);
-      try { persistRuntimeRecord(cur, rec, {exitReason: message}); } catch {}
-      if (cur.status === 'running') {
-        const failed = transition(cur, 'fail'); failed.error = message;
-        try { save(failed); } catch {}
-      }
-    });
-    w.on('exit', code => {
-      clearRuntimeMonitors(rec);
-      rec.phase = 'exited';
-      runtimeSupervisor.settleRelease(rec, false);
-      workers.delete(t.id);
-      const cur = repository.peek(t.id);
-      try { if (cur) persistRuntimeRecord(cur, rec, {exitCode: code}); } catch {}
-      if (cur?.status === 'running') {
+  }
+  /** An unacknowledged round is untrusted, but its process is deliberately kept. */
+  function settleAckTimeout(task, rec, roundId, timeoutMs) {
+    const failed = transition(task, 'fail');
+    failed.error = `Task ${task.id}: worker did not acknowledge round ${roundId} within ${timeoutMs / 1000}s; the process was not terminated`;
+    runtime.reportHealth(failed, rec, 'unhealthy', 'ack timeout');
+    event(failed, {kind: 'round_ack_timeout', roundId});
+    try { save(failed); } catch {}
+  }
+  /** A round deadline requests a stop; a failed stop must not look like a timeout. */
+  function stopAfterRoundTimeout(rec, timeoutMs) {
+    const id = rec.id;
+    stop(id, false, `Round exceeded ${Math.round(timeoutMs / 1000)} seconds`).catch(error => {
+      // A stop that cannot confirm exit leaves status=stopping and the
+      // worker handle in place, so the workspace stays locked.
+      const cur = repository.peek(id);
+      if (cur && cur.status === 'running') {
         const failed = transition(cur, 'fail');
-        failed.error = `Task ${t.id} worker exited (${code}); inspect runtime.log`;
+        failed.error = `Task ${id} timed out, but stopping it failed: ${error.message}`;
         try { save(failed); } catch {}
       }
     });
-    return rec;
   }
   /**
-   * Apply an already-validated round. Startup failures become a persisted
-   * failed task whose error names the ID; a live handle keeps the lock until
-   * its exit is observed.
+   * Apply an already-validated round. The Runtime module owns the unique
+   * roundId, the run -> ack -> result|error -> released ordering, the ACK,
+   * heartbeat, and round timers, and the release gate. This function owns the
+   * task record, the grant revocations, and the startup-failure bookkeeping.
    */
   async function executeRun(t, userPrompt, maxTokens, effort = null) {
     let current = repository.peek(t.id) ?? t;
-    let rec = workers.get(current.id);
+    const active = runtime.get(current.id);
     // A terminal result is persisted immediately, but the worker still owns the
     // round until it sends `released`. Both rework and provider fallback wait at
     // this gate; neither is allowed to race the worker's busy flag.
-    if (rec && rec.phase !== 'idle') {
-      const released = await runtimeSupervisor.waitForRelease(rec);
+    if (active && active.phase !== 'idle') {
+      const released = await runtime.waitForRelease(current.id);
       current = repository.peek(t.id) ?? current;
-      rec = workers.get(t.id);
       if (!released) {
         throw new Error(`Task ${t.id}: previous runtime exited before releasing its round; create a new task`);
       }
@@ -1158,11 +1068,14 @@ export function createManager(options = {}) {
     // instruction and each round keeps the version/hash actually applied.
     const policy = policyForRound();
     const effectivePrompt = policy.meta.applied ? `${userPrompt}\n---\n${policy.text}` : userPrompt;
-    const roundId = createRoundId();
+    const roundId = runtime.createRoundId();
     const next = transition(current, 'run');
-    // A new attempt revokes old acceptance and cleanup authorization.
-    grants.delete(next.id); if (fs.existsSync(grantFile(next.id))) fs.unlinkSync(grantFile(next.id));
-    next.acceptance = null; next.error = null; next.output = null;
+    // A new attempt first revokes the old acceptance, its report hash, and
+    // any cleanup grant; the module owns all three.
+    const revoked = acceptance.revoke(next);
+    next.acceptance = revoked.acceptance;
+    next.reportHash = revoked.reportHash;
+    next.error = null; next.output = null;
     next.maxTokens = maxTokens;
     next.effort = effort;
     next.runtimeHealth = 'starting';
@@ -1182,82 +1095,18 @@ export function createManager(options = {}) {
     });
     save(next);
     event(next, {kind: 'round_started', roundId, number: next.rounds.length, maxTokens, effort});
-    try { rec = workers.get(next.id) ?? spawnWorker(next); }
-    catch (error) {
-      markUntrusted(next.id, 'startup/communication failure');
-      throw failStart(next.id, error);
-    }
-    rec.roundId = roundId;
-    rec.phase = 'awaiting_ack';
-    rec.health = 'starting';
-    rec.lastHeartbeatAt = Date.now();
-    rec.terminalMessage = null;
-    rec.rejectedRound = false;
-    rec.pendingFallback = null;
-    persistRuntimeRecord(next, rec);
-    const ackSeconds = Number(config.ackTimeoutSeconds);
-    const ackTimeoutMs = Number.isFinite(ackSeconds) && ackSeconds > 0
-      ? ackSeconds * 1000
-      : DEFAULT_ACK_TIMEOUT_MS;
-    rec.ackTimer = setTimeout(() => {
-      if (rec.roundId !== roundId || rec.phase !== 'awaiting_ack') return;
-      rec.rejectedRound = true;
-      rec.unreworkableReason = `Worker did not acknowledge round ${roundId}; the runtime state is untrusted`;
-      clearAckTimer(rec);
-      const latest = repository.peek(next.id);
-      if (latest?.status === 'running') {
-        const failed = transition(latest, 'fail');
-        failed.error = `Task ${next.id}: worker did not acknowledge round ${roundId} within ${ackTimeoutMs / 1000}s; the process was not terminated`;
-        updateRuntimeHealth(failed, rec, 'unhealthy', 'ack timeout');
-        event(failed, {kind: 'round_ack_timeout', roundId});
-        try { save(failed); } catch {}
-      }
-    }, ackTimeoutMs);
-    rec.ackTimer.unref?.();
-    const heartbeatStaleMs = Number(config.heartbeatStaleMs) > 0
-      ? Number(config.heartbeatStaleMs)
-      : HEARTBEAT_STALE_MS;
-    const heartbeatCheckMs = Number(config.heartbeatCheckMs) > 0
-      ? Number(config.heartbeatCheckMs)
-      : 5_000;
-    rec.heartbeatWatch = setInterval(() => {
-      if (rec.roundId !== roundId || rec.phase !== 'running' || !rec.lastHeartbeatAt) return;
-      if (Date.now() - rec.lastHeartbeatAt < heartbeatStaleMs) return;
-      const latest = repository.peek(next.id);
-      if (latest) updateRuntimeHealth(latest, rec, 'unhealthy', `heartbeat stale for ${heartbeatStaleMs}ms; process retained`);
-    }, heartbeatCheckMs);
-    rec.heartbeatWatch.unref?.();
-    rec.timer = setTimeout(() => {
-      stop(next.id, false, `Round exceeded ${config.roundTimeoutSeconds} seconds`).catch(error => {
-        // A stop that cannot confirm exit leaves status=stopping and the
-        // worker handle in place, so the workspace stays locked.
-        const cur = repository.peek(next.id);
-        if (cur && cur.status === 'running') {
-          const failed = transition(cur, 'fail');
-          failed.error = `Task ${next.id} timed out, but stopping it failed: ${error.message}`;
-          try { save(failed); } catch {}
-        }
-      });
-    }, config.roundTimeoutSeconds * 1000);
-    rec.timer.unref?.();
     try {
-      // Only pass budgetFile for DSH SDK providers
-      const msg = {
-        kind: 'run',
+      runtime.openRound(next, {
         roundId,
-        task: next,
         prompt: effectivePrompt,
         maxTokens,
         effort,
-        ownerMarker: rec.ownerMarker,
-      };
-      if (next.provider?.type === 'dsh-sdk') {
-        msg.budgetFile = budgetFileFor(directory(next.id));
-      }
-      rec.w.send(msg);
+        // Only pass budgetFile for DSH SDK providers.
+        budgetFile: next.provider?.type === 'dsh-sdk' ? budgetFileFor(directory(next.id)) : null,
+        timeouts: roundTimeouts(config),
+      });
     } catch (error) {
-      clearRuntimeMonitors(rec);
-      markUntrusted(next.id, 'IPC send failure');
+      markUntrusted(next.id, 'startup/communication failure');
       throw failStart(next.id, error);
     }
     // The worker may have emitted error/exit/result synchronously inside send;
@@ -1270,35 +1119,31 @@ export function createManager(options = {}) {
     if (t.runtime?.manualActionRequired) {
       throw new Error(`Task ${id} has an unverified residual runtime; confirm PID ${t.runtime.pid} manually before closing`);
     }
-    const rec = workers.get(id);
+    const rec = runtime.get(id);
     // A running/stopping record without an owned handle cannot prove that its
     // executor is gone; refuse to mark it closed/cancelled silently.
     if (!rec && ['running', 'stopping'].includes(t.status)) throw new Error(`Task ${id} has no owned runtime handle; exit is unconfirmed, refusing to change state`);
     const target = transition(t, closed ? 'close' : 'stop');
     if (rec) {
-      if (rec.closing) throw new Error('Already stopping; refresh state');
-      rec.closing = true; clearRuntimeMonitors(rec);
+      if (!runtime.beginClose(id)) throw new Error('Already stopping; refresh state');
       t.status = 'stopping'; save(t); event(t, {kind: 'stop_requested', closed});
-      try { if (rec.w.connected) rec.w.send({kind: 'close'}); }
-      catch (error) {
-        markUntrusted(id, 'close IPC send failure');
-        rec.closeError = rec.closeError ?? `close request failed: ${error.message}`;
-      }
-      const graceful = await runtimeSupervisor.waitForExit(rec, 14000);
+      if (runtime.sendClose(id)) markUntrusted(id, 'close IPC send failure');
+      const graceful = await runtime.waitForExit(id, DEFAULT_EXIT_TIMEOUT_MS);
       if (!graceful) {
         // Only the worker handle owned by this manager is addressed.
         if (process.platform === 'win32') {
           const kill = spawn('taskkill', ['/PID', String(rec.w.pid), '/T', '/F'], {windowsHide: true, stdio: 'ignore'});
           await once(kill, 'exit');
         } else rec.w.kill('SIGKILL');
-        const gone = await runtimeSupervisor.waitForExit(rec, 5000);
+        const gone = await runtime.waitForExit(id, FORCE_EXIT_TIMEOUT_MS);
         if (!gone) throw new Error(`Task ${id}: could not confirm worker exit; data and workspace lock retained`);
       }
       // If the process is demonstrably gone but its exit event was missed,
       // release the owned handle now. Until this point the workspace lock held.
-      if (runtimeSupervisor.hasExited(rec) && workers.get(id) === rec) workers.delete(id);
-      if (rec.closeError) {
-        t.status = 'failed'; t.error = `Task ${id} runtime cleanup failed: ${rec.closeError}`;
+      runtime.forget(id);
+      const closeError = runtime.closeError(id);
+      if (closeError) {
+        t.status = 'failed'; t.error = `Task ${id} runtime cleanup failed: ${closeError}`;
         save(t); throw new Error(t.error);
       }
     }
@@ -1313,24 +1158,63 @@ export function createManager(options = {}) {
       updatedAt: new Date().toISOString(),
       error: reason ?? target.error,
     };
-    if (closed) finalTask.reportHash = report(finalTask).hash;
+    if (closed) finalTask.reportHash = acceptance.exportReport(finalTask, {policySection: policyReportSection(finalTask)}).hash;
     event(finalTask, {kind: closed ? 'closed' : 'cancelled'});
     return statusSummary(save(finalTask));
   }
-  function report(t) {
-    return writeTaskReport(t, {
-      reportsDir: REPORTS,
-      digest,
-      policySection: policyReportSection(t),
-    });
-  }
+  /** Preview/deletion preconditions and the fingerprint live in the module. */
   function deletionPreview(t) {
-    return previewTaskDeletion(t, {
-      directory: directory(t.id),
-      reportsDir: REPORTS,
-      digest,
-      live: workers.has(t.id),
-    });
+    return acceptance.preview(t, {directory: directory(t.id), live: workers.has(t.id)});
+  }
+  async function createTask(a = {}) {
+    // All request, budget, workspace, and occupancy checks happen before any
+    // task directory or record is written. A rejected request therefore leaves
+    // the task list, directories, files, and grants untouched.
+    const id = `task-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+    const preflight = preflightCreate(a, id);
+    const dir = directory(id);
+    fs.mkdirSync(dir); fs.mkdirSync(path.join(dir, 'home')); fs.mkdirSync(path.join(dir, 'tmp'));
+    let lease = null;
+    let t;
+    try {
+      lease = workspaceLeases.materialize(preflight.workspacePlan);
+      const executionWorkspace = resolveWorkspace(lease.executionWorkspace);
+      t = {
+        id,
+        schemaVersion: 2,
+        sessionId: `session-${id}`,
+        workspace: executionWorkspace,
+        sourceWorkspace: lease.sourceWorkspace,
+        workspaceLease: lease,
+        home: path.join(dir, 'home'),
+        patch: path.join(dir, 'runtime.patch.json'),
+        model: preflight.provider.model || config.model,
+        provider: preflight.provider,
+        plan: a.plan ?? a.prompt,
+        criteria: a.criteria ?? 'Delegating Agent must inspect outputs and run its own checks',
+        status: 'created',
+        rounds: [],
+        eventSequence: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        acceptance: null,
+        effort: preflight.effort,
+        usageLimits: preflight.usageLimits,
+      };
+      if (a.kind === 'research' && typeof a.batchId === 'string' && typeof a.shardId === 'string') {
+        t.kind = 'research';
+        t.batchId = a.batchId;
+        t.shardId = a.shardId;
+      }
+      // Only write DSH runtime patch for DSH SDK providers.
+      if (preflight.provider.type === 'dsh-sdk') patchFor(t);
+      save(t);
+    } catch (error) {
+      try { workspaceLeases.rollback(lease); } catch {}
+      try { repository.delete(id); fs.rmSync(dir, {recursive: true, force: true}); } catch {}
+      throw error;
+    }
+    return executeRun(t, preflight.prompt, preflight.maxTokens, preflight.effort);
   }
   async function action(name, a = {}) {
     if (!a || typeof a !== 'object' || Array.isArray(a)) throw new Error('Arguments must be an object');
@@ -1354,51 +1238,13 @@ export function createManager(options = {}) {
         if (q.view === 'log') return logPage(t, q.offset, q.limit);
         return historyPage(t, q.offset, q.limit);
       }
-      case 'create': {
-        // All request, budget, workspace, and occupancy checks happen before
-        // any task directory or record is written. A rejected request therefore
-        // leaves the task list, directories, files, and grants untouched.
-        const id = `task-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
-        const preflight = preflightCreate(a, id);
-        const dir = directory(id);
-        fs.mkdirSync(dir); fs.mkdirSync(path.join(dir, 'home')); fs.mkdirSync(path.join(dir, 'tmp'));
-        let lease = null;
-        let t;
-        try {
-          lease = workspaceLeases.materialize(preflight.workspacePlan);
-          const executionWorkspace = resolveWorkspace(lease.executionWorkspace);
-          t = {
-            id,
-            schemaVersion: 2,
-            sessionId: `session-${id}`,
-            workspace: executionWorkspace,
-            sourceWorkspace: lease.sourceWorkspace,
-            workspaceLease: lease,
-            home: path.join(dir, 'home'),
-            patch: path.join(dir, 'runtime.patch.json'),
-            model: preflight.provider.model || config.model,
-            provider: preflight.provider,
-            plan: a.plan ?? a.prompt,
-            criteria: a.criteria ?? 'Delegating Agent must inspect outputs and run its own checks',
-            status: 'created',
-            rounds: [],
-            eventSequence: 0,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            acceptance: null,
-            effort: preflight.effort,
-            usageLimits: preflight.usageLimits,
-          };
-          // Only write DSH runtime patch for DSH SDK providers.
-          if (preflight.provider.type === 'dsh-sdk') patchFor(t);
-          save(t);
-        } catch (error) {
-          try { workspaceLeases.rollback(lease); } catch {}
-          try { repository.delete(id); fs.rmSync(dir, {recursive: true, force: true}); } catch {}
-          throw error;
-        }
-        return executeRun(t, preflight.prompt, preflight.maxTokens, preflight.effort);
-      }
+      case 'wait': return waitForTask(a);
+      case 'research_start': return research.start(a);
+      case 'research_status': return research.status(a.id);
+      case 'research_wait': return research.wait(a.id, {timeoutSeconds: a.timeoutSeconds});
+      case 'research_collect': return research.collect(a.id, {offset: a.offset, limit: a.limit});
+      case 'research_cancel': return research.cancel(a.id);
+      case 'create': return createTask(a);
       case 'rework': {
         const t = get(a.id);
         // Strict validation happens before any state, round, budget, grant, or file change.
@@ -1446,29 +1292,40 @@ export function createManager(options = {}) {
       case 'cancel': return stop(a.id, false);
       case 'close': return stop(a.id, true);
       case 'accept': {
+        // Lifecycle first, then evidence: an illegal status must still report
+        // "Cannot accept task in ..." exactly as before.
         const t = transition(get(a.id), 'accept');
-        if (typeof a.evidence !== 'string' || !a.evidence.trim()) throw new Error('Delegating acceptance evidence required');
-        t.acceptance = {evidence: a.evidence, at: new Date().toISOString()};
-        const r = report(t); t.reportHash = r.hash; event(t, {kind: 'accepted', evidence: a.evidence}); return statusSummary(save(t));
+        const accepted = acceptance.accept(t, {evidence: a.evidence, policySection: policyReportSection(t)});
+        event(accepted.task, {kind: 'accepted', evidence: a.evidence});
+        return statusSummary(save(accepted.task));
       }
-      case 'export': { const t = get(a.id); const r = report(t); t.reportHash = r.hash; save(t); return r; }
+      case 'export': {
+        const t = get(a.id);
+        const exported = acceptance.exportReport(t, {policySection: policyReportSection(t)});
+        save(exported.task);
+        return {file: exported.file, hash: exported.hash};
+      }
       case 'preview_delete': return deletionPreview(get(a.id));
       case 'grant_delete': {
         // This endpoint is intentionally omitted from the MCP tool catalogue.
         // The trusted delegating party must obtain explicit human permission; the local OS account is the prototype trust boundary.
-        if (a.confirmation !== a.id) throw new Error('Exact human-confirmed task ID required');
-        const preview = deletionPreview(get(a.id));
-        const grant = {id: a.id, fingerprint: preview.fingerprint, at: new Date().toISOString(), scope: 'this-task-only'};
-        grants.set(a.id, grant); atomicJson(grantFile(a.id), grant); return preview;
+        // The module requires the complete, exact task ID before it previews.
+        acceptance.assertConfirmation(a.id, a.confirmation);
+        const t = get(a.id);
+        return acceptance.grant(t, {
+          directory: directory(t.id),
+          live: workers.has(t.id),
+          confirmation: a.confirmation,
+        });
       }
       case 'delete': {
-        const t = get(a.id), preview = deletionPreview(t), grant = grants.get(a.id);
-        if (!grant || grant.fingerprint !== preview.fingerprint) throw new Error('No matching human cleanup authorization; retained all data');
-        // Resolved exact task directory, closed runtime, no followed links, external report.
-        fs.rmSync(preview.directory, {recursive: true});
-        fs.unlinkSync(grantFile(a.id)); grants.delete(a.id); repository.delete(a.id);
+        // Preview, archived-report hash, grant scope, and fingerprint equality
+        // are one decision inside the module; the manager only reaps records.
+        const t = get(a.id);
+        const deleted = acceptance.removeTask(t, {directory: directory(t.id), live: workers.has(t.id)});
+        repository.delete(a.id);
         eventSequences.delete(a.id);
-        return {deleted: a.id, preserved: preview.preserved};
+        return deleted;
       }
       default: throw new Error(`Unknown action: ${name}`);
     }

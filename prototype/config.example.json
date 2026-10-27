@@ -11,6 +11,7 @@
   "defaultProvider": "dsh-sdk",
   "fallbackProvider": "dsh-sdk",
   "workspaceMode": "auto",
+  "researchRoot": "",
   "worktreeContainerName": ".waxwing-worktrees",
   "ackTimeoutSeconds": 10,
   "executionPolicy": {

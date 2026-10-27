@@ -32,6 +32,7 @@ test('configuration resolves public paths, local overrides, and environment over
 
   const local = loadConfiguration({here: dir, env: {}});
   assert.equal(local.config.root, path.resolve(dir, 'local-data'));
+  assert.equal(local.config.researchRoot, path.resolve(dir, 'local-data-research'));
   assert.equal(local.config.dshRepo, path.resolve(dir, '../public-dsh'));
   assert.equal(local.config.credentialsFile, path.resolve(dir, '../public-dsh/credentials.yaml'));
   assert.equal(local.config.providersDir, path.resolve(dir, 'local-providers'));
@@ -47,12 +48,14 @@ test('configuration resolves public paths, local overrides, and environment over
       DSH_SUBAGENT_PROVIDERS_DIR: '../env-providers',
       DSH_SUBAGENT_PORT: '43210',
       DSH_SUBAGENT_NODE: 'node',
+      WAXWING_RESEARCH_ROOT: '../env-research',
     },
   });
   assert.equal(overridden.config.root, path.resolve(dir, '../env-data'));
   assert.equal(overridden.config.providersDir, path.resolve(dir, '../env-providers'));
   assert.equal(overridden.config.port, 43210);
   assert.equal(overridden.config.node, 'node');
+  assert.equal(overridden.config.researchRoot, path.resolve(dir, '../env-research'));
 });
 
 test('configuration rejects invalid ports and malformed JSON', t => {

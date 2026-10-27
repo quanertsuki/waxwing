@@ -19,7 +19,7 @@ new integrations should use `waxwing` and `waxwing-mcp`.
 | `execution-policy.md` | Optional per-round execution policy |
 
 The extracted public facades live under `src/tasks`, `src/workspace`,
-`src/runtime`, `src/acceptance`, `src/usage`, `src/providers`, and
+`src/runtime`, `src/acceptance`, `src/research`, `src/usage`, `src/providers`, and
 `src/adapters`. Some facades still delegate here while the manager is split
 incrementally.
 
@@ -53,6 +53,8 @@ Important fields:
 
 An empty `node` uses the Node executable already running the manager. An empty
 `providersDir` resolves to `<WAXWING_HOME>/providers`.
+Research scratch workspaces default to `<WAXWING_HOME>-research` and can be
+changed with `WAXWING_RESEARCH_ROOT` or the `researchRoot` config field.
 
 ## Task lifecycle
 
@@ -78,6 +80,19 @@ A task event contains a monotonic sequence and `roundId`. Rework and Provider
 fallback wait for `released`. Busy workers return `worker_busy`; stale,
 duplicate, and late messages are recorded and rejected. Runtime identity records
 allow verified recovery after a manager restart.
+
+## Parallel research
+
+`research_start` creates multiple shard tasks for one read-only question. Each
+shard owns a separate scratch workspace and runs concurrently. Results are
+captured before shard runtimes close, failed shards do not erase successful
+ones, and `research_collect` writes one aggregate Markdown report.
+
+Use CLI `research-start`, `research-wait`, `research-status`,
+`research-collect`, and `research-cancel`, or the matching MCP tools with both
+`waxwing_` and `ds_` prefixes. This path deliberately does not support multiple execution Agents
+writing concurrently in one physical project directory; use isolated
+worktrees, or serialize writes through `workspaceMode=shared`.
 
 ## Providers
 

@@ -11,6 +11,10 @@ const HERE=path.dirname(fileURLToPath(import.meta.url));
 const dataRoot=path.join(HERE,'.tmp',`data-${process.pid}`);
 fs.rmSync(dataRoot,{recursive:true,force:true});
 // Isolate the manager under test: never touch the live prototype-data root.
+// WAXWING_HOME outranks DSH_SUBAGENT_ROOT in config resolution, so pin it too:
+// a caller that already exports WAXWING_HOME must not drag the suite onto a
+// live data root (the manager suite refuses to run in that case).
+process.env.WAXWING_HOME=dataRoot;
 process.env.DSH_SUBAGENT_ROOT=dataRoot;
 process.env.DSH_PROTOTYPE_ROOT=dataRoot;
 process.env.DSH_SUBAGENT_PROVIDERS_DIR=path.join(HERE,'fixtures','providers');
@@ -28,9 +32,12 @@ await import('./openai-chat.test.mjs');
 await import('./manager.test.mjs');
 await import('./compact.test.mjs');
 await import('./reliability.test.mjs');
+await import('./runtime-module.test.mjs');
 await import('./runtime-protocol.test.mjs');
 await import('./runtime-identity.test.mjs');
 await import('./workspace.test.mjs');
+await import('./research.test.mjs');
+await import('./change-notifier.test.mjs');
 await import('./cli.test.mjs');
 await import('./usage.test.mjs');
 await import('./execution-limits.test.mjs');

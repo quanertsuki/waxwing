@@ -19,9 +19,11 @@ interface.
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
-| `src/runtime/supervisor.mjs` | Release and confirmed-exit gates |
+| `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff |
+| `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
+| `src/research/service.mjs` | Parallel read-only research shards, scratch workspaces, partial results, aggregate reports |
 | `src/usage/service.mjs` | Metrics facade; optional thresholds are disabled by default |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
@@ -50,9 +52,11 @@ flowchart LR
 
   subgraph Manager["Local manager: single state owner"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
-    Runtime["RuntimeSupervisor<br/>round gate + heartbeat + recovery"]
+    Runtime["Runtime<br/>round IDs + heartbeat + recovery"]
+    Supervisor["RuntimeSupervisor<br/>release + exit gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
     Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
+    Research["ResearchBatchService<br/>parallel scratch shards + report"]
     Usage["UsageService<br/>metrics; limits opt-in"]
     Providers["ProviderRegistry<br/>DSH SDK + OpenAI-compatible"]
   end
@@ -61,6 +65,7 @@ flowchart LR
   Protocol["Round protocol<br/>run -> ack -> events -> released"]
   Tools["Tool loop<br/>unlimited requests by default"]
   Workspace["Shared workspace<br/>or isolated Git worktree"]
+  Scratch["Research scratch workspaces<br/>one directory per shard"]
   DSH["DeepSeek Harness"]
   API["OpenAI-compatible API"]
   Data[("Per-user data directory<br/>runs / runtime / reports")]
@@ -77,11 +82,16 @@ flowchart LR
 
   Gateway --> Tasks
   Gateway --> Acceptance
+  Gateway --> Research
   Gateway --> Usage
   Tasks <--> Runtime
+  Runtime --> Supervisor
   Tasks <--> Lease
   Tasks <--> Data
   Acceptance --> Data
+  Research --> Tasks
+  Research --> Scratch
+  Research --> Data
   Runtime --> Data
 
   Runtime --> Protocol
@@ -91,6 +101,7 @@ flowchart LR
   Providers --> API
   Worker --> Tools
   Tools --> Workspace
+  Worker --> Scratch
   Lease <--> Workspace
 
   Legacy -. forwards to .-> Gateway
@@ -157,6 +168,27 @@ manager                         worker
 Acceptance and close stop the runtime but retain the worktree and branch.
 `cleanup_worktree` removes only a clean worktree and never deletes the branch.
 
+## Parallel research batches
+
+`research_start` fans one read-only question out to multiple execution Agents.
+Every shard receives a separate scratch workspace below
+`<WAXWING_RESEARCH_ROOT>` (default `<WAXWING_HOME>-research`). Source projects
+are referenced by URL or prompt and are not writable shared directories.
+
+- Shards are dispatched concurrently through the same manager.
+- `research_wait` blocks server-side until the batch settles or the caller's
+  timeout expires.
+- Successful shard runtimes close automatically after their result is captured.
+- A failed shard does not discard results from completed shards.
+- `research_collect` writes one aggregate report under `<WAXWING_HOME>/reports`
+  and returns a bounded page plus a content hash.
+- `research_cancel` stops unfinished shards and retains completed evidence.
+
+This supports parallel reading, source comparison, and synthesis. It does not
+allow multiple execution Agents to write concurrently in one physical project
+directory. Write tasks use separate worktrees or an explicitly serialized
+`shared` workspace.
+
 ## Relationship to adjacent projects
 
 | Project | Common ground | Waxwing's deliberate difference |
@@ -183,8 +215,20 @@ Waxwing/
     home/
     tmp/
   reports/<task-id>.md
+  reports/research-<batch-id>.md
+  research/research-<batch-id>/
+    batch.json
+    shards/<shard-id>.md
   providers/*.json
   runtime/server-token
+```
+
+Research scratch workspaces are stored outside the state directory by default:
+
+```text
+<WAXWING_HOME>-research/
+  research-<batch-id>/
+    <shard-id>/
 ```
 
 On first start, legacy repository-local data is copied into the new root. The
