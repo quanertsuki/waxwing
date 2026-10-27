@@ -18,15 +18,18 @@ pub struct TaskUsage {
 pub struct Task {
     pub id: String,
     pub status: String,
+    pub status_label: Option<String>,
     pub round_count: usize,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub workspace: String,
     pub source_workspace: Option<String>,
     pub workspace_mode: Option<String>,
+    pub workspace_label: Option<String>,
     pub branch: Option<String>,
     pub base_commit: Option<String>,
     pub runtime_health: Option<String>,
+    pub cleanup_authorized: Option<bool>,
     pub summary: String,
     pub live: bool,
     pub accepted: bool,
@@ -259,5 +262,29 @@ mod tests {
             manager_entry_argument(&script),
             Ok(OsStr::new("server.mjs"))
         );
+    }
+
+    #[test]
+    fn task_contract_accepts_the_shared_view_labels_and_compatibility_fields() {
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id": "task-0123456789ab",
+            "status": "awaiting_review",
+            "statusLabel": "待验收",
+            "roundCount": 2,
+            "workspace": "C:/work/task",
+            "workspaceMode": "worktree",
+            "workspaceLabel": "独立 Worktree",
+            "runtimeHealth": "healthy",
+            "cleanupAuthorized": true,
+            "summary": "bounded",
+            "live": true,
+            "accepted": false
+        }))
+        .expect("shared task view must deserialize");
+
+        assert_eq!(task.status_label.as_deref(), Some("待验收"));
+        assert_eq!(task.workspace_label.as_deref(), Some("独立 Worktree"));
+        assert_eq!(task.cleanup_authorized, Some(true));
+        assert_eq!(task.round_count, 2);
     }
 }

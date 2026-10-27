@@ -3,7 +3,7 @@ import {existsSync, readdirSync, readFileSync} from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 
-function walk(directory, prefix = '') {
+export function walk(directory, prefix = '') {
   const files = [];
   for (const entry of readdirSync(directory, {withFileTypes: true})) {
     const relative = path.posix.join(prefix, entry.name);
@@ -13,26 +13,30 @@ function walk(directory, prefix = '') {
   return files;
 }
 
-let root;
-let files;
-try {
-  root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  }).trim();
-  files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-    .split('\0')
-    .filter(Boolean)
-    .map(file => file.replaceAll('\\', '/'));
-} catch {
-  root = process.cwd();
-  files = walk(root);
+function discoverReleaseTree(cwd = process.cwd()) {
+  let root;
+  let files;
+  try {
+    root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+      cwd: root,
+      encoding: 'utf8',
+    })
+      .split('\0')
+      .filter(Boolean)
+      .map(file => file.replaceAll('\\', '/'));
+  } catch {
+    root = cwd;
+    files = walk(root);
+  }
+  return {root, files};
 }
 
-const required = [
+export const required = [
   'bin/waxwing.mjs',
   'bin/waxwing-mcp.mjs',
   'desktop/src-tauri/src/tasks.rs',
@@ -42,10 +46,17 @@ const required = [
   'src/acceptance/service.mjs',
   'src/app.mjs',
   'src/research/service.mjs',
+  'src/research/state.mjs',
   'src/runtime/module.mjs',
   'src/runtime/protocol.mjs',
   'src/runtime/supervisor.mjs',
   'src/tasks/change-notifier.mjs',
+  'src/tasks/lifecycle.mjs',
+  'src/tasks/view.mjs',
+  'src/tasks/transaction.mjs',
+  'src/tasks/repository.mjs',
+  'src/usage/policy.mjs',
+  'src/usage/service.mjs',
   'src/workspace/lease-manager.mjs',
 ];
 
@@ -75,41 +86,51 @@ const textExtensions = new Set([
   '.yml',
   '.yaml',
 ]);
-const machinePathPatterns = [
-  /[A-Za-z]:\/Users\/[^/\s"'`<>]+/i,
-  /[A-Za-z]:\/DS_subagent(?:\/|$)/i,
-  /(?:^|[\s"'`(])\/(?:home|Users)\/[^/\s"'`<>]+(?:\/|$)/m,
-];
-const presentFiles = files.filter(file => existsSync(path.join(root, file)));
+
+function isMachineSpecificWindowsPath(value) {
+  const normalized = value.replace(/^[\s"'`(=]+/, '');
+  const drivePath = /^[A-Za-z]:(?:\/|$)/.test(normalized)
+    ? normalized.slice(2)
+    : normalized;
+  const pathParts = drivePath.split('/').filter(Boolean);
+  return pathParts[0]?.toLowerCase() === 'users'
+    || pathParts.some(part => part.toLowerCase() === 'ds_subagent');
+}
 
 export function findMachineSpecificPath(content) {
   const normalized = String(content).replaceAll('\\', '/');
-  return machinePathPatterns.some(pattern => pattern.test(normalized));
+  // Generic documentation can use a drive path such as C:/work. Personal
+  // home directories and the legacy repository location are not portable.
+  return [...normalized.matchAll(/(?:^|[\s"'`(=])([A-Za-z]):\/[^\s"'`<>]+/gm)]
+    .some(match => isMachineSpecificWindowsPath(match[0]))
+    || /(?:^|[\s"'`(])\/(?:home|Users)\/[^/\s"'`<>]+(?:\/|$)/m.test(normalized);
 }
 
-export function checkReleaseTree({releaseFiles = presentFiles} = {}) {
+export function checkReleaseTree({root, releaseFiles} = {}) {
+  const tree = root && releaseFiles ? {root, files: releaseFiles} : discoverReleaseTree();
+  const presentFiles = tree.files.filter(file => existsSync(path.join(tree.root, file)));
   const errors = [];
   for (const file of required) {
-    if (!releaseFiles.includes(file)) errors.push(`missing required release file: ${file}`);
+    if (!presentFiles.includes(file)) errors.push(`missing required release file: ${file}`);
   }
-  for (const file of releaseFiles) {
+  for (const file of presentFiles) {
     if (forbiddenRoots.test(file) || forbiddenAnywhere.test(file) || forbiddenSecret.test(file)) {
       errors.push(`forbidden release path: ${file}`);
     }
     if (!textExtensions.has(path.extname(file).toLowerCase())) continue;
-    const content = readFileSync(path.join(root, file), 'utf8');
+    const content = readFileSync(path.join(tree.root, file), 'utf8');
     if (findMachineSpecificPath(content)) errors.push(`machine-specific path in: ${file}`);
   }
-  return errors;
+  return {errors: [...new Set(errors)], releaseFiles: presentFiles};
 }
 
 const isMain = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isMain) {
-  const errors = checkReleaseTree();
+  const {errors, releaseFiles} = checkReleaseTree();
   if (errors.length > 0) {
     console.error(errors.join('\n'));
     process.exit(1);
   }
 
-  console.log(`Release tree check passed: ${presentFiles.length} release files`);
+  console.log(`Release tree check passed: ${releaseFiles.length} release files`);
 }

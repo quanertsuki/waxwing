@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {HERE,config} from './common.mjs';
+import {boundedReason,evaluateLimits,effectiveLimits} from '../src/usage/policy.mjs';
 
 const INDEX_VERSION=1;
 const INDEX_NAME='usage-index.json';
@@ -73,59 +74,6 @@ function statOrNull(file) {
     catch (error) { if (error?.code==='ENOENT') return null; throw error; }
 }
 
-// ---------------------------------------------------------------------------
-// Cumulative task limits
-// ---------------------------------------------------------------------------
-
-/** Resolved limits stored on a task, falling back to the current global config. */
-function effectiveLimits(task) {
-    const override=task&&typeof task==='object'&&task.usageLimits&&typeof task.usageLimits==='object'&&
-        !Array.isArray(task.usageLimits)?task.usageLimits:null;
-    const raw=override?{...config.usageLimits,...override}:config.usageLimits;
-    return {
-        enabled:raw?.enabled===true,
-        warnCostCny:raw?.warnCostCny,
-        blockCostCny:raw?.blockCostCny,
-        warnRequests:raw?.warnRequests,
-        blockRequests:raw?.blockRequests,
-    };
-}
-function finiteCost(value) {
-    return typeof value==='number'&&Number.isFinite(value)?value:null;
-}
-function boundedReason(value,max=200) {
-    const text=typeof value==='string'?value:'';
-    return text.length>max?`${text.slice(0,max-1)}…`:text;
-}
-/**
- * Evaluate the cumulative request and cost dimensions. Requests without usage
- * count toward internalRequests; a cost limit participates only when the whole
- * cost total is complete and reliable.
- */
-function evaluateLimits(usage,limits) {
-    const internalRequests=(usage.requests??0)+(usage.requestsWithoutUsage??0);
-    const cost=finiteCost(usage.estimatedCostCny);
-    const costLimitReliable=usage.available===true&&usage.costComplete===true;
-    const fields={internalRequests,limits,costLimitReliable};
-    if (limits.enabled!==true) {
-        return {...fields,limitState:'disabled',limitWarning:false,limitBlocked:false,limitsEvaluated:false,message:null};
-    }
-    if (usage.available!==true) {
-        return {...fields,limitState:'unavailable',limitWarning:true,limitBlocked:false,limitsEvaluated:false,
-            message:'Usage data is unavailable; cumulative limits were not evaluated and rework is not blocked by usage'};
-    }
-    const costText=costLimitReliable&&cost!==null?`, ${round(cost,6)}/${limits.blockCostCny} CNY`:'';
-    if (internalRequests>=limits.blockRequests||(costLimitReliable&&cost!==null&&cost>=limits.blockCostCny)) {
-        return {...fields,limitState:'blocked',limitWarning:false,limitBlocked:true,limitsEvaluated:true,
-            message:`Cumulative usage limit reached (${internalRequests}/${limits.blockRequests} requests${costText})`};
-    }
-    const warnText=costLimitReliable&&cost!==null?`, ${round(cost,6)}/${limits.warnCostCny} CNY`:'';
-    if (internalRequests>=limits.warnRequests||(costLimitReliable&&cost!==null&&cost>=limits.warnCostCny)) {
-        return {...fields,limitState:'warning',limitWarning:true,limitBlocked:false,limitsEvaluated:true,
-            message:`Cumulative usage warning (${internalRequests}/${limits.warnRequests} requests${warnText})`};
-    }
-    return {...fields,limitState:'ok',limitWarning:false,limitBlocked:false,limitsEvaluated:true,message:null};
-}
 function listSummary(usage) {
     const result={
         available:true,
@@ -776,7 +724,7 @@ function computeUsage(task,taskDir,options={}) {
  * Never throws: an unreadable event source becomes limitState "unavailable".
  */
 export function usageForTask(task,taskDir,options={}) {
-    const limits=effectiveLimits(task);
+    const limits=effectiveLimits(task?.usageLimits,config.usageLimits);
     try {
         const computed=computeUsage(task,taskDir,options);
         const evaluation=evaluateLimits(computed.statusUsage,limits);
