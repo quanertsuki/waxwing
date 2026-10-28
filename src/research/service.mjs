@@ -1,6 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
+import {
+  aggregateBatchStatus,
+  countByShardStatus,
+  isActiveBatch,
+  isTerminalBatch,
+  shardTransition,
+} from './state.mjs';
 
 const BATCH_ID = /^research-[a-f0-9]{12}$/;
 const SHARD_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -8,8 +15,6 @@ const DEFAULT_PAGE_LIMIT = 2000;
 const MAX_PAGE_LIMIT = 4000;
 const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
-const TERMINAL_TASK = new Set(['awaiting_review', 'failed', 'cancelled', 'closed', 'accepted']);
-const ACTIVE_BATCH = new Set(['running', 'cancelling', 'finalizing']);
 
 function requireText(value, label, maxLength = 100000) {
   if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
@@ -213,30 +218,11 @@ export class ResearchBatchService {
   }
 
   counts(batch) {
-    return batch.shards.reduce((counts, shard) => {
-      counts.total += 1;
-      counts[shard.status] = (counts[shard.status] ?? 0) + 1;
-      return counts;
-    }, {
-      total: 0,
-      planned: 0,
-      running: 0,
-      completed: 0,
-      failed: 0,
-      cancelled: 0,
-    });
+    return countByShardStatus(batch.shards);
   }
 
   aggregateStatus(batch) {
-    const counts = this.counts(batch);
-    const active = counts.planned + counts.running;
-    if (batch.cancelRequested && active === 0) return counts.completed > 0 ? 'partial' : 'cancelled';
-    if (active > 0) return batch.cancelRequested ? 'cancelling' : 'running';
-    if (batch.shards.some(shard => shard.finalizing)) return 'finalizing';
-    if (counts.completed === counts.total) return 'completed';
-    if (counts.completed > 0) return 'partial';
-    if (counts.cancelled > 0 && counts.failed === 0) return 'cancelled';
-    return 'failed';
+    return aggregateBatchStatus(batch);
   }
 
   summary(batch) {
@@ -382,29 +368,16 @@ export class ResearchBatchService {
     for (const shard of batch.shards) {
       if (!shard.taskId) continue;
       const task = this.getTask(shard.taskId);
-      if (!task) {
-        if (shard.status !== 'failed') {
-          shard.status = 'failed';
-          shard.error = `Task record is missing: ${shard.taskId}`;
-          dirty = true;
-        }
-        continue;
+      const transition = shardTransition(shard, task);
+      Object.assign(shard, transition.patch);
+      dirty ||= transition.dirty;
+      if (!task) continue;
+      if (transition.capture) {
+        await this.captureTerminal(batch, shard, task);
       }
-      if (shard.taskStatus !== task.status) {
-        shard.taskStatus = task.status;
-        dirty = true;
-      }
-      if (TERMINAL_TASK.has(task.status)) {
-        if (!shard.resultCaptured) {
-          await this.captureTerminal(batch, shard, task);
-          dirty = true;
-        }
-        if (task.status !== 'closed' && typeof this.closeTask === 'function' && !shard.runtimeReleased) {
+      if (transition.finalize) {
+        if (typeof this.closeTask === 'function') {
           if (!this.canCloseTask(task.id)) {
-            if (!shard.finalizing) {
-              shard.finalizing = true;
-              dirty = true;
-            }
             continue;
           }
           try {
@@ -418,10 +391,10 @@ export class ResearchBatchService {
             shard.cleanupError = error.message;
             dirty = true;
           }
+        } else {
+          shard.finalizing = false;
+          dirty = true;
         }
-      } else if (['created', 'running', 'stopping'].includes(task.status) && shard.status !== 'cancelled') {
-        shard.status = 'running';
-        dirty = true;
       }
     }
     const status = this.aggregateStatus(batch);
@@ -452,7 +425,7 @@ export class ResearchBatchService {
       const batch = this.load(id);
       await this.refresh(batch);
       const summary = this.summary(batch);
-      if (!ACTIVE_BATCH.has(batch.status)) {
+      if (!isActiveBatch(batch.status)) {
         return {
           ...summary,
           wait: {timedOut: false, timeoutSeconds, waitedMs: Date.now() - startedAt},
@@ -476,7 +449,7 @@ export class ResearchBatchService {
 
   async cancel(id) {
     const batch = this.load(id);
-    if (['completed', 'partial', 'failed', 'cancelled'].includes(batch.status)) {
+    if (isTerminalBatch(batch.status)) {
       return this.summary(batch);
     }
     batch.cancelRequested = true;
