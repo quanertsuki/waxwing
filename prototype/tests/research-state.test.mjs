@@ -105,3 +105,20 @@ test('missing records, active tasks, and terminal sets are explicit', () => {
     cancelled: 0,
   });
 });
+
+test('a closed task is terminal without a second capture or finalization', () => {
+  const transitioned = shardTransition({
+    status: 'completed',
+    taskId: 'task-0123456789ab',
+    taskStatus: 'awaiting_review',
+    resultCaptured: true,
+    runtimeReleased: true,
+  }, {status: 'closed'});
+  assert.deepEqual(transitioned, {
+    dirty: true,
+    patch: {taskStatus: 'closed'},
+    capture: false,
+    finalize: false,
+    terminal: true,
+  });
+});
