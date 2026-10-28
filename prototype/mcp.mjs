@@ -1,8 +1,11 @@
 // Stdio proxy: every caller connects to the SAME local manager, not its own jobs map.
 import path from 'node:path';
+import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import readline from 'node:readline';
 import {ensureServer,request} from './client.mjs';
+// The reported server version must follow the published manifest, not a copy.
+const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const string={type:'string'};
 // Output budgets are real JSON numbers, not strings. The schema states the
 // wire contract (positive integer) and the validator enforces it.
@@ -127,7 +130,7 @@ export async function handle(m, io={}) {
   if(m.id===undefined)return;
   const result=value=>({jsonrpc:'2.0',id:m.id,result:value});
   if(m.method==='initialize')return result({protocolVersion:['2024-11-05','2025-03-26','2025-06-18'].includes(m.params?.protocolVersion)?m.params.protocolVersion:'2025-03-26',
-    capabilities:{tools:{}},serverInfo:{name:'waxwing',version:'0.1.0'},
+    capabilities:{tools:{}},serverInfo:{name:'waxwing',version:VERSION},
     instructions:'Delegate a complete, independently acceptable task; handle simple tasks directly. Plan, create, then use wait for the bounded summary instead of a manual status polling loop. Read view=result, report, usage, workspace, diff, or log only as needed, paging with offset/limit. Independently verify work and accept with evidence. Request and cost limits are disabled by default. Deletion needs separate human authorization; completion is not acceptance.'});
   if(m.method==='ping')return result({});
   if(m.method==='tools/list')return result({tools:catalogue});

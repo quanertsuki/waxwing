@@ -5,6 +5,8 @@ and uses semantic versioning for public releases.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-28
+
 ### Added
 
 - Shared task lifecycle transactions, workspace-lease acquisition/release, and
@@ -21,6 +23,8 @@ and uses semantic versioning for public releases.
   fan-out across articles, web pages, and repositories
 - `WAXWING_RESEARCH_ROOT` for moving per-shard scratch workspaces away from the
   per-user state directory
+- The npm package ships `scripts/`, so the release check its manifest advertises
+  runs after installation
 
 ### Changed
 
@@ -32,8 +36,10 @@ and uses semantic versioning for public releases.
   2.12.4
 - npm package, desktop package, Rust crate, and Windows bundle metadata
   attribute the release to `quanertsuki`
-- The npm package is published as `@quanernya/waxwing@0.1.0` and installs the
+- The npm package is published as `@quanernya/waxwing` and installs the
   `waxwing` and `waxwing-mcp` commands
+- `@quanernya/waxwing@0.1.0` was published from the deepening branch during
+  round three; `0.1.1` is the first registry release cut from `main`
 
 ### Fixed
 
@@ -43,6 +49,10 @@ and uses semantic versioning for public releases.
   composition root, including the task lifecycle module
 - The release-tree check includes non-ignored working files, skips deleted
   tracked files, and still fails when a required release file is absent
+- `prototype/tests/.tmp` stays bounded: a run reaps the scratch roots abandoned
+  by earlier runs instead of keeping every `data-<pid>` directory forever
+- `npm run check:release-tree` passes inside an installed package by validating
+  the shipped subset instead of the repository-only desktop sources
 
 ## [0.1.0] - 2026-10-25
 
