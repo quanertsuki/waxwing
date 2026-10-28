@@ -8,6 +8,7 @@ import {
   overrideEvent,
   parseOverride,
   unavailableUsageSnapshot,
+  unavailableUsageView,
 } from './policy.mjs';
 import {
   usageForList,
@@ -19,27 +20,6 @@ import {
 function boundedError(error, max = 240) {
   const text = error?.message ?? String(error);
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-function emptyView(task, totals) {
-  return {
-    id: task?.id ?? null,
-    model: typeof task?.model === 'string' && task.model ? task.model : null,
-    pricing: null,
-    totals,
-    rounds: [],
-    requests: [],
-    missingUsage: [],
-    warnings: totals?.warnings ?? [totals?.error ?? 'usage is unavailable'],
-    scan: {
-      eventsBytes: 0,
-      indexedBytes: 0,
-      bytesRead: 0,
-      pendingBytes: 0,
-      rebuilt: false,
-      parseErrors: 0,
-    },
-  };
 }
 
 /**
@@ -82,14 +62,34 @@ export class UsageModule {
     return value === undefined ? this.limits(task) : this.requestedLimits(task, value);
   }
 
-  /** Never throws: unreadable metrics become one explicit unavailable snapshot. */
+  /**
+   * Never throws: limits are resolved once and passed into the metrics
+   * operation, and a damaged task limit override degrades to the configured
+   * fallback instead of escaping.
+   */
   snapshot(task, taskDirectory, options = {}) {
+    let limits = options.limits;
+    if (limits === undefined) {
+      try {
+        limits = this.limits(task);
+      } catch {
+        // A damaged task override must not hide the metrics behind a limits
+        // error; continue with the configured fallback limit set.
+        limits = this.fallbackLimits();
+      }
+    }
     try {
-      return this.operations.usageForTask(task, taskDirectory, options);
+      return this.operations.usageForTask(task, taskDirectory, {...options, limits});
     } catch (error) {
-      let limits = this.configuration;
-      try { limits = this.limits(task); } catch {}
       return unavailableUsageSnapshot({task, reason: boundedError(error), limits});
+    }
+  }
+
+  fallbackLimits() {
+    try {
+      return this.limits({});
+    } catch {
+      return this.configuration ?? {};
     }
   }
 
@@ -102,10 +102,13 @@ export class UsageModule {
     return {usage: snapshot.statusUsage, usageRounds: snapshot.usageRounds};
   }
 
+  /** Project the already-computed snapshot; never scan the event log twice. */
   view(task, taskDirectory) {
     const snapshot = this.snapshot(task, taskDirectory);
-    if (snapshot.computed) return this.operations.usageForView(task, taskDirectory);
-    return emptyView(task, snapshot.statusUsage);
+    if (snapshot.computed) {
+      return this.operations.usageForView(task, taskDirectory, {result: snapshot});
+    }
+    return unavailableUsageView(task, snapshot.statusUsage);
   }
 
   /**
@@ -170,22 +173,6 @@ export class UsageModule {
     return result;
   }
 
-  /** Commit the accepted decision to the task/event stream. */
-  commitRework(task, decision, notify) {
-    if (!decision) return task;
-    if (decision.event) {
-      task.lastLimitOverride = {
-        at: decision.event.overrideAt,
-        reason: boundedReason(decision.override.reason),
-      };
-      const payload = {...decision.event};
-      delete payload.overrideAt;
-      notify(task, payload);
-    }
-    if (decision.requestedLimits) task.usageLimits = decision.requestedLimits;
-    return task;
-  }
-
   /** Apply the event projection from decideRework after all checks succeeded. */
   applyRework(task, result) {
     if (!result) return task;
@@ -210,6 +197,7 @@ export {
   overrideEvent,
   parseOverride,
   unavailableUsageSnapshot,
+  unavailableUsageView,
   usageForList,
   usageForStatus,
   usageForTask,

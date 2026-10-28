@@ -362,13 +362,36 @@ export function createManager(options = {}) {
     const message = `Task ${id} failed to start: ${error.message}${runtimeUnconfirmed ? '; runtime exit not confirmed (process may still be running)' : ''}`;
     const cur = repository.peek(id);
     if (cur) {
-      const failed = cur.status === 'running' ? transition(cur, 'fail')
-        : {...cur, status: 'failed', updatedAt: new Date().toISOString()};
-      failed.error = message;
-      try { event(failed, {kind: 'start_failed', error: error.message, runtimeUnconfirmed}); } catch {}
-      try { save(failed); } catch {}
+      const outcome = outcomeSettlement.startFailed({
+        task: cur,
+        error: error.message,
+        message,
+        runtimeUnconfirmed,
+      });
+      const persistError = persistFailure(outcome);
+      if (persistError) {
+        return new Error(`${message}; failure could not be persisted: ${persistError.message}`);
+      }
     }
     return new Error(message);
+  }
+  /**
+   * Persist a projected failure once. Event and save errors stay observable
+   * instead of being silently swallowed; async callers log, while failStart
+   * folds the error into the error it throws.
+   */
+  function persistFailure(outcome) {
+    let persistError = null;
+    try { event(outcome.task, outcome.event); } catch (error) { persistError = error; }
+    if (!persistError) {
+      try { save(outcome.task); } catch (error) { persistError = error; }
+    }
+    if (persistError) {
+      try {
+        console.error(`Waxwing: could not persist failure projection for ${outcome.task.id}: ${persistError.message}`);
+      } catch {}
+    }
+    return persistError;
   }
   /**
    * Bounded list/status item. `withPaths` is true for status and mutation
@@ -568,29 +591,8 @@ export function createManager(options = {}) {
     return record;
   }
   function restoreTasks() {
-    for (const name of fs.readdirSync(RUNS)) {
-      if (!/^task-[a-f0-9]{12}$/.test(name)) continue;
-      const t = JSON.parse(fs.readFileSync(path.join(directory(name), 'task.json'), 'utf8'));
-      t.schemaVersion = 2;
-      if (!t.workspaceLease) {
-        t.workspaceLease = {
-          mode: 'legacy',
-          status: 'retained',
-          sourceWorkspace: t.workspace,
-          executionWorkspace: t.workspace,
-        };
-        t.sourceWorkspace = t.workspace;
-      }
-      if (!Number.isSafeInteger(t.eventSequence)) {
-        const eventsFile = path.join(directory(name), 'events.jsonl');
-        try {
-          const lines = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').filter(Boolean);
-          const last = lines.length ? JSON.parse(lines.at(-1)) : null;
-          t.eventSequence = Number.isSafeInteger(last?.sequence) ? last.sequence : lines.length;
-        } catch {
-          t.eventSequence = 0;
-        }
-      }
+    for (const t of repository.restore()) {
+      const name = t.id;
       eventSequences.set(name, t.eventSequence);
       if (['running', 'stopping'].includes(t.status)) {
         let runtime = t.runtime;
@@ -779,9 +781,11 @@ export function createManager(options = {}) {
     void executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort).catch(error => {
       const latest = repository.peek(fallback.taskId);
       if (latest && latest.status !== 'failed') {
-        const failedTask = transition(latest, 'fail');
-        failedTask.error = `Fallback to ${fallback.providerName} also failed: ${error.message}`;
-        try { save(failedTask); } catch {}
+        persistFailure(outcomeSettlement.fallbackFailed({
+          task: latest,
+          providerName: fallback.providerName,
+          message: `Fallback to ${fallback.providerName} also failed: ${error.message}`,
+        }));
       }
     });
   }
@@ -800,9 +804,11 @@ export function createManager(options = {}) {
       // worker handle in place, so the workspace stays locked.
       const cur = repository.peek(id);
       if (cur && cur.status === 'running') {
-        const failed = transition(cur, 'fail');
-        failed.error = `Task ${id} timed out, but stopping it failed: ${error.message}`;
-        try { save(failed); } catch {}
+        persistFailure(outcomeSettlement.stopFailed({
+          task: cur,
+          timeoutMs,
+          message: `Task ${id} timed out, but stopping it failed: ${error.message}`,
+        }));
       }
     });
   }

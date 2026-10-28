@@ -223,6 +223,65 @@ test('compatibility report helpers keep the same hash and scratch safety checks'
   }
 });
 
+test('a failed acceptance save restores the previous report', () => {
+  const context = fixture();
+  try {
+    const file = context.service.reportPath(ID);
+    fs.writeFileSync(file, 'previous report\n');
+    assert.throws(() => context.service.acceptAndSave(
+      {...context.task, status: 'awaiting_review'},
+      {
+        evidence: 'checked',
+        save: () => { throw new Error('disk full'); },
+      },
+    ), /disk full/);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'previous report\n');
+  } finally {
+    closeFixture(context);
+  }
+});
+
+test('a failed report rename restores the previous report atomically', () => {
+  const context = fixture();
+  try {
+    const file = context.service.reportPath(ID);
+    fs.writeFileSync(file, 'previous report\n');
+    let renames = 0;
+    const service = new AcceptanceService({
+      reportsDir: context.reports,
+      grantsDir: context.grants,
+      files: {
+        renameSync: (from, to) => {
+          renames += 1;
+          if (renames === 2) throw new Error('rename failed');
+          fs.renameSync(from, to);
+        },
+      },
+    });
+    assert.throws(() => service.report(context.task), /rename failed/);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'previous report\n');
+  } finally {
+    closeFixture(context);
+  }
+});
+
+test('a deletion whose index cleanup fails reports the pending index entry', () => {
+  const context = fixture();
+  try {
+    const task = closedTask(context);
+    context.service.grant(task, {directory: context.scratch, confirmation: ID});
+    const result = context.service.removeTaskAndForget(task, {
+      directory: context.scratch,
+      forget: () => { throw new Error('index unavailable'); },
+    });
+    assert.equal(result.deleted, ID);
+    assert.equal(result.indexPending, true);
+    assert.equal(fs.existsSync(context.scratch), false);
+  } finally {
+    closeFixture(context);
+  }
+});
+
 test('accept, export, and delete sequence report persistence through save adapters', () => {
   const context = fixture();
   try {

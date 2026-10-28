@@ -37,6 +37,60 @@ export function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+const DEFAULT_FILES = {
+  existsSync: (...args) => fs.existsSync(...args),
+  mkdirSync: (...args) => fs.mkdirSync(...args),
+  renameSync: (...args) => fs.renameSync(...args),
+  rmSync: (...args) => fs.rmSync(...args),
+  writeFileSync: (...args) => fs.writeFileSync(...args),
+};
+
+/**
+ * Write one report without ever exposing a half-written body. The previous
+ * report is kept until the caller commits, so a failed task save can restore
+ * the exact bytes that existed before the attempt.
+ */
+function beginReportFile(file, content, digest, files = DEFAULT_FILES) {
+  files.mkdirSync(path.dirname(file), {recursive: true});
+  const temporary = `${file}.${process.pid}.new`;
+  const backup = `${file}.${process.pid}.bak`;
+  const hadPrevious = files.existsSync(file);
+  try {
+    files.writeFileSync(temporary, content);
+    if (hadPrevious) files.renameSync(file, backup);
+    files.renameSync(temporary, file);
+  } catch (error) {
+    if (hadPrevious) {
+      try { files.renameSync(backup, file); } catch {}
+    }
+    try { files.rmSync(temporary, {force: true}); } catch {}
+    throw error;
+  }
+  return {
+    file,
+    content,
+    hash: digest(content),
+    commit() {
+      if (hadPrevious) {
+        try { files.rmSync(backup, {force: true}); } catch {}
+      }
+    },
+    rollback() {
+      try { files.rmSync(file, {force: true}); } catch {}
+      if (hadPrevious) {
+        try { files.renameSync(backup, file); } catch {}
+      }
+    },
+  };
+}
+
+/** Compatibility helper: write and immediately commit one report. */
+export function writeReportFile(file, content, {digest = sha256, files = DEFAULT_FILES} = {}) {
+  const report = beginReportFile(file, content, digest, files);
+  report.commit();
+  return {file, hash: report.hash};
+}
+
 export function reportContent(task, {policySection = ''} = {}) {
   return `# Waxwing task ${task.id}\n\nWorkspace: ${task.workspace}\nSource workspace: ${task.sourceWorkspace ?? task.workspace}\nModel: ${task.model}\nPlan: ${task.plan}\nAcceptance criteria: ${task.criteria}\n\n` +
     task.rounds.map(round => `## Round ${round.number}\n\nRound ID: ${round.roundId ?? '(legacy)'}\n\nOutput budget: ${round.maxTokens ?? '(inherited from the task default)'}\n\nReasoning effort: ${round.effort ?? '(not applied)'}\n\nInstruction:\n${round.prompt}\n\nResult:\n${round.result?.text ?? '(interrupted)'}\n\nEnd: ${round.result?.finishReason ?? round.result?.error ?? 'interrupted'}\n`).join('\n') +
@@ -152,9 +206,7 @@ export function previewTaskDeletion(task, {directory, reportsDir, digest = sha25
 export function writeTaskReport(task, {reportsDir, digest = sha256, policySection = ''}) {
   const content = reportContent(task, {policySection});
   const file = path.join(reportsDir, `${task.id}.md`);
-  fs.mkdirSync(path.dirname(file), {recursive: true});
-  fs.writeFileSync(file, content);
-  return {file, hash: digest(content)};
+  return writeReportFile(file, content, {digest});
 }
 
 function writeGrantFile(file, grant) {
@@ -177,11 +229,18 @@ function writeGrantFile(file, grant) {
  * mirrored to one 0600 file per task.
  */
 export class AcceptanceService {
-  constructor({reportsDir, grantsDir, digest = sha256, now = () => new Date().toISOString()} = {}) {
+  constructor({
+    reportsDir,
+    grantsDir,
+    digest = sha256,
+    now = () => new Date().toISOString(),
+    files = null,
+  } = {}) {
     this.reportsDir = reportsDir;
     this.grantsDir = grantsDir;
     this.digest = digest;
     this.now = now;
+    this.files = {...DEFAULT_FILES, ...(files ?? {})};
     this.grants = new Map();
   }
 
@@ -198,13 +257,22 @@ export class AcceptanceService {
     return reportContent(task, {policySection});
   }
 
+  /** Open one atomic report write; the caller must commit or roll it back. */
+  beginReport(task, {policySection = ''} = {}) {
+    const content = reportContent(task, {policySection});
+    return beginReportFile(
+      this.reportPath(task.id),
+      content,
+      this.digest,
+      this.files,
+    );
+  }
+
   /** Write the external report and return its file and hash; never mutates. */
   report(task, {policySection = ''} = {}) {
-    const content = reportContent(task, {policySection});
-    const file = this.reportPath(task.id);
-    fs.mkdirSync(path.dirname(file), {recursive: true});
-    fs.writeFileSync(file, content);
-    return {file, hash: this.digest(content)};
+    const report = this.beginReport(task, {policySection});
+    report.commit();
+    return {file: report.file, hash: report.hash};
   }
 
   /** Validate evidence, record acceptance, write the report, stamp the hash. */
@@ -229,16 +297,34 @@ export class AcceptanceService {
    */
   acceptAndSave(task, {evidence, policySection = '', save} = {}) {
     if (typeof save !== 'function') throw new Error('save dependency is required');
-    const accepted = this.accept(task, {evidence, policySection});
-    return save(accepted.task);
+    if (typeof evidence !== 'string' || !evidence.trim()) throw new Error(EVIDENCE_ERROR);
+    const accepted = {...task, acceptance: {evidence, at: this.now()}};
+    return this.writeReportAndSave(accepted, {policySection, save}).task;
+  }
+
+  /**
+   * Persist a report and the task that carries its hash as one sequence. The
+   * previous report is restored if the task save fails, so no caller can leave
+   * an archived report that no record points at.
+   */
+  writeReportAndSave(task, {policySection = '', save} = {}) {
+    if (typeof save !== 'function') throw new Error('save dependency is required');
+    const report = this.beginReport(task, {policySection});
+    let saved;
+    try {
+      saved = save({...task, reportHash: report.hash});
+    } catch (error) {
+      report.rollback();
+      throw error;
+    }
+    report.commit();
+    return {task: saved, file: report.file, hash: report.hash};
   }
 
   /** Persist a refreshed report and its new hash as one module-owned step. */
   exportAndSave(task, {policySection = '', save} = {}) {
     if (typeof save !== 'function') throw new Error('save dependency is required');
-    const exported = this.exportReport(task, {policySection});
-    save(exported.task);
-    return {file: exported.file, hash: exported.hash};
+    return this.writeReportAndSave(task, {policySection, save});
   }
 
   /** Deletion preview; every precondition lives in previewTaskDeletion. */
@@ -317,7 +403,7 @@ export class AcceptanceService {
   /** Remove the scratch directory and its grant; the report and workspace stay. */
   removeTask(task, {directory, live = false} = {}) {
     const {preview} = this.authorize(task, {directory, live});
-    fs.rmSync(preview.directory, {recursive: true});
+    this.files.rmSync(preview.directory, {recursive: true});
     this.forgetGrant(task.id);
     return {deleted: task.id, preserved: preview.preserved};
   }
@@ -329,11 +415,18 @@ export class AcceptanceService {
    */
   removeTaskAndForget(task, {directory, live = false, forget} = {}) {
     const deleted = this.removeTask(task, {directory, live});
+    let indexPending = false;
     if (forget !== undefined) {
       if (typeof forget !== 'function') throw new Error('forget dependency must be a function');
-      forget(task.id);
+      try {
+        forget(task.id);
+      } catch {
+        // The scratch data is already gone. Report the index gap instead of
+        // pretending the delete failed or silently forgetting the task.
+        indexPending = true;
+      }
     }
-    return deleted;
+    return {...deleted, indexPending};
   }
 
   /**

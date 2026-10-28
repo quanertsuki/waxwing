@@ -5,6 +5,34 @@ and uses semantic versioning for public releases.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
+### Changed
+
+- Task close now projects one explicit outcome: a verified process exit, the
+  stored close error, the final task/report commit, and handle release all
+  happen in order, and a failed save keeps the handle retryable
+- Restart recovery consumes an explicit termination verdict, so an unverified
+  process is retained with its workspace lock instead of being treated as
+  terminated
+- Workspace lease acquisition compensates exactly once and refuses to clean or
+  release a lock that requires manual runtime handling
+- Acceptance reports and task records commit together; a failed task save
+  restores the previous report
+- Task restoration validates IDs and applies legacy lease/event migrations in
+  the repository instead of the coordinator
+- The task view contract is generated from the real view functions and checked
+  by JS, Rust fixture, and `vue-tsc`; Rust/Vue models now read the full bounded
+  list/detail shape, including result preview bounds and round timestamps
+- Desktop manager requests share one transport policy: structured errors,
+  1–4000 page limits, and a running/unhealthy/not-running health probe
+- Research refresh shares one in-flight pass per batch, isolates unreadable
+  shards with `captureError`, settles crash-window planned shards as orphaned,
+  serializes close, and writes reports atomically with stable hashes
+- Usage limits are resolved once per request and passed into metrics; a damaged
+  task limit override falls back to configured limits, `view` projects the same
+  snapshot instead of rescanning, and `UsageService` delegates to `UsageModule`
+
 ## [0.1.1] - 2026-10-28
 
 ### Added

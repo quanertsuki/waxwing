@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before common.mjs or manager.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {ROOT} from '../common.mjs';
-import {usageForList,usageForStatus,usageForView} from '../usage.mjs';
+import {usageForList,usageForStatus,usageForTask,usageForView} from '../usage.mjs';
 import {createManager} from '../manager.mjs';
 import {parseStatusArgs} from '../cli.mjs';
 import {catalogue,handle} from '../mcp.mjs';
@@ -577,6 +577,28 @@ test('CLI accepts view=usage and MCP exposes Waxwing plus legacy tools',async()=
     assert.ok(statusTool.inputSchema.properties.view.enum.includes('usage'));
     assert.deepEqual(statusTool.inputSchema,exportedStatus.inputSchema);
     assert.match(statusTool.description,/usage/i);
+});
+
+test('direct usage exports never throw on a damaged task limit override',()=>{
+    const task={
+        id:`task-${'f'.repeat(12)}`,
+        model:null,
+        rounds:[],
+        usageLimits:{enabled:'yes'},
+    };
+    const dir=path.join(base,'damaged-limits');
+    const snapshot=usageForTask(task,dir);
+    assert.equal(snapshot.available,false);
+    assert.match(snapshot.statusUsage.error,/enabled must be a boolean/);
+    const list=usageForList(task,dir);
+    assert.equal(list.available,false);
+    assert.match(list.error,/enabled must be a boolean/);
+    const status=usageForStatus(task,dir);
+    assert.equal(status.usage.available,false);
+    assert.deepEqual(status.usageRounds,[]);
+    const view=usageForView(task,dir);
+    assert.equal(view.totals.available,false);
+    assert.deepEqual(view.requests,[]);
 });
 
 test.after(async()=>{await manager.shutdown();});

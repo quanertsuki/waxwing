@@ -272,4 +272,26 @@ export function unavailableUsageSnapshot({task = null, reason, limits}) {
   };
 }
 
+/** One unavailable full-view projection shared by the module and legacy path. */
+export function unavailableUsageView(task, statusUsage) {
+  return {
+    id: task?.id ?? null,
+    model: typeof task?.model === 'string' && task.model ? task.model : null,
+    pricing: null,
+    totals: statusUsage,
+    rounds: [],
+    requests: [],
+    missingUsage: [],
+    warnings: statusUsage?.warnings ?? [statusUsage?.error ?? 'usage is unavailable'],
+    scan: {
+      eventsBytes: 0,
+      indexedBytes: 0,
+      bytesRead: 0,
+      pendingBytes: 0,
+      rebuilt: false,
+      parseErrors: 0,
+    },
+  };
+}
+
 export {LIMIT_FIELDS, OVERRIDE_REASON_LIMIT};

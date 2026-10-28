@@ -80,11 +80,31 @@ export function verifyOwnedRuntime(record, options = {}) {
 }
 
 export function terminateVerifiedRuntime(record, options = {}) {
-  const identity = verifyOwnedRuntime(record, options);
-  if (!identity.verified) return identity;
+  const initial = options.identity ?? verifyOwnedRuntime(record, options);
+  if (!initial || initial.verified !== true) {
+    return {...(initial ?? {}), verified: false, terminated: false};
+  }
+  // A PID can be reused between the recovery decision and the kill. Re-check
+  // immediately before terminating and report the verdict instead of assuming
+  // that a non-throwing call means the process is gone.
+  const current = verifyOwnedRuntime(record, options);
+  if (current.verified !== true) {
+    return {
+      ...current,
+      terminated: false,
+      reason: current.reason ?? 'runtime identity changed before termination',
+    };
+  }
   if (options.terminate) {
-    options.terminate(record);
-    return {...identity, terminated: true};
+    const value = options.terminate(record);
+    if (value === false || value?.terminated === false) {
+      return {
+        ...current,
+        terminated: false,
+        reason: value?.reason ?? 'termination was not confirmed',
+      };
+    }
+    return {...current, terminated: true};
   }
   if (process.platform === 'win32') {
     execFileSync('taskkill', ['/PID', String(record.pid), '/T', '/F'], {
@@ -95,5 +115,5 @@ export function terminateVerifiedRuntime(record, options = {}) {
   } else {
     process.kill(record.pid, 'SIGTERM');
   }
-  return {...identity, terminated: true};
+  return {...current, terminated: true};
 }

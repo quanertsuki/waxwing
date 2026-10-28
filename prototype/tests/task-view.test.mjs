@@ -1,14 +1,19 @@
+import fs from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeTaskDetail,
   statusLabel,
-  TASK_LIST_FIELDS,
+  TASK_VIEW_CONTRACT,
   taskListView,
   taskPageView,
   taskSummaryView,
   workspaceLabel,
 } from '../../src/tasks/view.mjs';
+import {
+  buildTaskViewContract,
+  CONTRACT_FIXTURE_PATH,
+} from '../../scripts/generate-task-contract.mjs';
 
 const task = {
   id: 'task-0123456789ab',
@@ -189,7 +194,38 @@ test('detail normalization is a bounded whitelist and never leaks raw task field
   assert.equal(detail.lastRound.roundId, 'round-1');
   assert.equal(detail.lastRound.effort, 'high');
   assert.equal(detail.lastRound.startedAt, undefined);
-  for (const field of TASK_LIST_FIELDS) {
+  assert.equal(detail.lastRound.finishedAt, undefined);
+  assert.equal(detail.lastRound.maxTokens, undefined);
+  for (const field of TASK_VIEW_CONTRACT.list.required) {
     assert.ok(field in list, `list must expose ${field}`);
+    assert.ok(!TASK_VIEW_CONTRACT.list.optional.includes(field),
+      `list.${field} cannot be both required and optional`);
   }
+});
+
+test('the committed contract fixture matches the real view functions', () => {
+  const committed = JSON.parse(fs.readFileSync(CONTRACT_FIXTURE_PATH, 'utf8'));
+  assert.deepEqual(buildTaskViewContract(), committed,
+    'regenerate with node scripts/generate-task-contract.mjs when the view changes');
+});
+
+test('contract fields cover every view key and every required key is present', () => {
+  const fixture = buildTaskViewContract();
+  for (const shape of ['list', 'detail']) {
+    const actual = Object.keys(fixture[shape]);
+    const {required, optional} = TASK_VIEW_CONTRACT[shape];
+    assert.equal(new Set(required).size, required.length, `${shape} has duplicate required fields`);
+    assert.equal(new Set(optional).size, optional.length, `${shape} has duplicate optional fields`);
+    for (const field of actual) {
+      assert.ok(required.includes(field) || optional.includes(field),
+        `${shape}.${field} is produced but missing from the contract`);
+    }
+    for (const field of required) {
+      assert.ok(field in fixture[shape], `${shape} must expose required field ${field}`);
+      assert.ok(!optional.includes(field), `${shape}.${field} cannot be both required and optional`);
+    }
+  }
+  const detail = fixture.detail;
+  assert.equal(detail.lastRound.startedAt, '2026-10-28T01:00:00.000Z');
+  assert.equal(detail.lastRound.finishedAt, '2026-10-28T01:02:00.000Z');
 });

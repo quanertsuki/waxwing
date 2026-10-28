@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {UsageModule} from '../../src/usage/module.mjs';
+import {UsageService} from '../../src/usage/service.mjs';
 
 const limits = {
   enabled: true,
@@ -128,4 +129,106 @@ test('UsageModule never throws for unavailable metrics', () => {
   assert.equal(view.totals.available, false);
   assert.deepEqual(view.requests, []);
   assert.match(view.totals.warnings[0], /events unavailable/);
+});
+
+test('view projects the snapshot it already computed instead of scanning twice', () => {
+  const calls = [];
+  const result = snapshot({
+    available: true,
+    internalRequests: 1,
+    requests: 1,
+    estimatedCostCny: 1,
+    costComplete: true,
+    limitState: 'ok',
+  });
+  const usage = new UsageModule({
+    configuration: limits,
+    operations: {
+      usageForTask() {
+        calls.push('scan');
+        return result;
+      },
+      usageForView(task, directory, options) {
+        calls.push('view');
+        assert.equal(task.id, 'task-0123456789ab');
+        assert.equal(directory, 'unused');
+        assert.equal(options.result, result);
+        return {id: task.id, totals: options.result.statusUsage};
+      },
+    },
+  });
+  const view = usage.view({id: 'task-0123456789ab', usageLimits: limits}, 'unused');
+  assert.deepEqual(calls, ['scan', 'view']);
+  assert.equal(view.totals.requests, 1);
+});
+
+test('a damaged task limit override falls back to the configured limits', () => {
+  const task = {
+    id: 'task-0123456789ab',
+    usageLimits: {enabled: 'yes'},
+  };
+  const seen = [];
+  const usage = new UsageModule({
+    configuration: limits,
+    operations: {
+      usageForTask(taskValue, directory, options) {
+        seen.push({task: taskValue, directory, limits: options.limits});
+        return snapshot({
+          available: true,
+          internalRequests: 1,
+          requests: 1,
+          estimatedCostCny: 1,
+          costComplete: true,
+          limitState: 'ok',
+        });
+      },
+      usageForView: taskValue => ({id: taskValue.id}),
+    },
+  });
+  assert.equal(usage.list(task, 'unused').requests, 1);
+  assert.equal(usage.status(task, 'unused').usage.available, true);
+  assert.deepEqual(usage.view(task, 'unused'), {id: task.id});
+  assert.deepEqual(seen.map(call => call.limits), [limits, limits, limits]);
+  assert.deepEqual(seen.map(call => call.directory), ['unused', 'unused', 'unused']);
+});
+
+test('UsageService delegates to a module and keeps the operations shape', () => {
+  const operations = {
+    usageForTask: () => snapshot({
+      available: true,
+      internalRequests: 1,
+      requests: 1,
+      estimatedCostCny: 1,
+      costComplete: true,
+      limitState: 'ok',
+    }),
+    usageForView: task => ({id: task.id, projected: true}),
+  };
+  const module = new UsageModule({operations, configuration: limits});
+  const delegated = new UsageService(module);
+  const legacy = new UsageService(operations);
+  const task = {id: 'task-0123456789ab', usageLimits: limits};
+  for (const facade of [delegated, legacy]) {
+    assert.deepEqual(facade.list(task, 'unused'), module.list(task, 'unused'));
+    assert.deepEqual(facade.status(task, 'unused'), module.status(task, 'unused'));
+    assert.deepEqual(facade.view(task, 'unused'), module.view(task, 'unused'));
+  }
+});
+
+test('UsageService and UsageModule return the same unavailable projections', () => {
+  const operations = {
+    usageForTask() {
+      throw new Error('events unavailable');
+    },
+    usageForView() {
+      throw new Error('must not be called');
+    },
+  };
+  const module = new UsageModule({operations});
+  const service = new UsageService(operations);
+  const task = {id: 'task-0123456789ab'};
+  assert.deepEqual(service.list(task, 'unused'), module.list(task, 'unused'));
+  assert.deepEqual(service.status(task, 'unused'), module.status(task, 'unused'));
+  assert.deepEqual(service.view(task, 'unused'), module.view(task, 'unused'));
+  assert.equal(service.view(task, 'unused').totals.available, false);
 });

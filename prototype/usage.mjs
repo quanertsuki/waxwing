@@ -15,6 +15,7 @@ import {
     effectiveLimits,
     evaluateLimits,
     unavailableUsageSnapshot,
+    unavailableUsageView,
 } from '../src/usage/policy.mjs';
 
 const INDEX_VERSION=1;
@@ -729,8 +730,12 @@ function computeUsage(task,taskDir,options={}) {
  * Never throws: an unreadable event source becomes limitState "unavailable".
  */
 export function usageForTask(task,taskDir,options={}) {
-    const limits=effectiveLimits(task?.usageLimits,config.usageLimits);
+    // The module passes one limit set for this request; direct callers keep the
+    // legacy fallback. Both paths stay inside the never-throw guard so a
+    // damaged task.usageLimits cannot escape through list/status/view.
+    let limits=options.limits;
     try {
+        if (limits===undefined) limits=effectiveLimits(task?.usageLimits,config.usageLimits);
         const computed=computeUsage(task,taskDir,options);
         const evaluation=evaluateLimits(computed.statusUsage,limits);
         const {message,...limitFields}=evaluation;
@@ -752,7 +757,17 @@ export function usageForTask(task,taskDir,options={}) {
         return result;
     } catch (error) {
         const reason=shortError(error);
+        if (limits===undefined) limits=fallbackLimits();
         return unavailableUsageSnapshot({task,reason,limits});
+    }
+}
+
+/** Complete global limits, or the raw global object when it is damaged. */
+function fallbackLimits() {
+    try {
+        return effectiveLimits(undefined,config.usageLimits);
+    } catch {
+        return config.usageLimits??{};
     }
 }
 
@@ -767,22 +782,15 @@ export function usageForStatus(task,taskDir) {
     return {usage:result.statusUsage,usageRounds:result.usageRounds};
 }
 
-/** Full usage view payload (pagination is applied by the manager). Never throws. */
-export function usageForView(task,taskDir) {
-    const result=usageForTask(task,taskDir);
+/**
+ * Full usage view payload (pagination is applied by the manager). Never throws.
+ * `options.result` lets UsageModule project the snapshot it already computed,
+ * so totals and rounds cannot come from two different scans.
+ */
+export function usageForView(task,taskDir,options={}) {
+    const result=options.result??usageForTask(task,taskDir,options);
     if (!result.computed) {
-        const reason=result.statusUsage.error??'usage is unavailable';
-        return {
-            id:task?.id??null,
-            model:typeof task?.model==='string'&&task.model?task.model:null,
-            pricing:null,
-            totals:result.statusUsage,
-            rounds:[],
-            requests:[],
-            missingUsage:[],
-            warnings:result.statusUsage.warnings,
-            scan:{eventsBytes:0,indexedBytes:0,bytesRead:0,pendingBytes:0,rebuilt:false,parseErrors:0},
-        };
+        return unavailableUsageView(task,result.statusUsage);
     }
     const computed=result.computed;
     const {pricing,...totals}=result.statusUsage;

@@ -5,6 +5,7 @@ mod paths;
 mod providers;
 mod settings;
 mod tasks;
+mod transport;
 
 fn main() {
     tauri::Builder::default()
@@ -12,7 +13,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             tasks::get_tasks,
             tasks::get_task_detail,
-            tasks::get_task_usage,
             tasks::get_task_view,
             tasks::create_task,
             tasks::rework_task,

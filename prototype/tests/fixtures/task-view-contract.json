@@ -1,0 +1,107 @@
+{
+  "list": {
+    "id": "task-0123456789ab",
+    "status": "awaiting_review",
+    "statusLabel": "待验收",
+    "roundCount": 1,
+    "live": true,
+    "workspace": "C:/work/task",
+    "workspaceMode": "worktree",
+    "workspaceLabel": "独立 Worktree",
+    "maxTokens": 4096,
+    "accepted": false,
+    "cleanupAuthorized": true,
+    "provider": "fixture",
+    "model": "fixture-model",
+    "error": null,
+    "runtimeHealth": "healthy",
+    "createdAt": "2026-10-28T00:59:00.000Z",
+    "updatedAt": "2026-10-28T01:02:01.000Z",
+    "usage": {
+      "available": true,
+      "requests": 2,
+      "inputTokens": 10,
+      "outputTokens": 20,
+      "estimatedCostCny": 0.25,
+      "costComplete": true,
+      "warnings": []
+    },
+    "summary": "bounded preview",
+    "effort": "high",
+    "lastRound": 1
+  },
+  "detail": {
+    "id": "task-0123456789ab",
+    "status": "awaiting_review",
+    "statusLabel": "待验收",
+    "roundCount": 1,
+    "live": true,
+    "workspace": "C:/work/task",
+    "workspaceMode": "worktree",
+    "workspaceLabel": "独立 Worktree",
+    "maxTokens": 4096,
+    "accepted": false,
+    "cleanupAuthorized": true,
+    "provider": "fixture",
+    "model": "fixture-model",
+    "error": null,
+    "runtimeHealth": "healthy",
+    "createdAt": "2026-10-28T00:59:00.000Z",
+    "updatedAt": "2026-10-28T01:02:01.000Z",
+    "usage": {
+      "available": true,
+      "requests": 2,
+      "inputTokens": 10,
+      "outputTokens": 20,
+      "estimatedCostCny": 0.25,
+      "costComplete": true,
+      "warnings": [],
+      "limitState": "disabled"
+    },
+    "effort": "high",
+    "lastRound": {
+      "number": 1,
+      "roundId": "round-1",
+      "startedAt": "2026-10-28T01:00:00.000Z",
+      "finishedAt": "2026-10-28T01:02:00.000Z",
+      "effort": "high"
+    },
+    "sourceWorkspace": "C:/work/source",
+    "branch": "waxwing/task-0123456789ab",
+    "baseCommit": "0123456789abcdef0123456789abcdef01234567",
+    "worktreeStatus": "active",
+    "roundId": "round-1",
+    "manualActionRequired": false,
+    "runtimePhase": "running",
+    "sessionId": "session-1",
+    "dataDirectory": "C:/data/runs/task-0123456789ab",
+    "report": "C:/data/reports/task-0123456789ab.md",
+    "canRework": false,
+    "reworkBlockedReason": "runtime is live",
+    "lastEvent": {
+      "sequence": 7,
+      "type": "result"
+    },
+    "eventCount": 7,
+    "runtimeReady": true,
+    "acceptedAt": null,
+    "resultPreview": "bounded result",
+    "resultPreviewChars": 14,
+    "resultTotalChars": 100,
+    "resultPreviewComplete": false,
+    "resultPreviewTruncated": true,
+    "resultFinishReason": "completed",
+    "usageRounds": [
+      {
+        "number": 1,
+        "requests": 2,
+        "inputTokens": 10,
+        "outputTokens": 20
+      }
+    ],
+    "runtime": {
+      "pid": 4242,
+      "manualActionRequired": false
+    }
+  }
+}

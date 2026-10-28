@@ -4,15 +4,22 @@
             <h2>任务列表</h2>
             <div class="header-actions">
                 <button class="new-task" @click="showCreate = true">新建任务</button>
-                <button @click="loadTasks" :disabled="loading">刷新</button>
+                <button @click="loadTasks()" :disabled="loading">刷新</button>
             </div>
         </div>
 
-        <div v-if="!managerRunning" class="manager-warning">
+        <div v-if="managerHealth === 'notRunning'" class="manager-warning">
             <div class="warning-content">
                 <span class="warning-icon">⚠️</span>
                 <span>Manager 未运行</span>
                 <button class="btn-start" @click="startManager">启动 Manager</button>
+            </div>
+        </div>
+        <div v-else-if="managerHealth === 'unhealthy'" class="manager-warning unhealthy">
+            <div class="warning-content">
+                <span class="warning-icon">⚠️</span>
+                <span>Manager 正在运行，但健康检查失败</span>
+                <button class="btn-start" @click="loadTasks()">重新检查</button>
             </div>
         </div>
 
@@ -74,27 +81,37 @@ interface Task {
     status: string;
     statusLabel?: string;
     roundCount: number;
-    provider?: string;
-    model?: string;
+    provider?: string | null;
+    model?: string | null;
     workspace: string;
+    workspaceMode: string;
+    workspaceLabel?: string;
     summary: string;
+    summaryTruncated?: boolean;
+    error?: string | null;
+    errorTruncated?: boolean;
+    effort?: string;
+    lastRound?: number;
     live: boolean;
     accepted: boolean;
-    maxTokens?: number;
-    usage?: TaskUsage;
-    workspaceMode?: string;
-    workspaceLabel?: string;
+    maxTokens?: number | null;
+    usage: TaskUsage | null;
     cleanupAuthorized?: boolean;
     runtimeHealth?: string;
     createdAt?: string;
     updatedAt?: string;
+    kind?: 'research';
+    batchId?: string | null;
+    shardId?: string | null;
 }
+
+type ManagerHealth = 'running' | 'unhealthy' | 'notRunning';
 
 const tasks = ref<Task[]>([]);
 const loading = ref(true);
 const error = ref('');
 const selectedTask = ref<Task | null>(null);
-const managerRunning = ref(true);
+const managerHealth = ref<ManagerHealth>('running');
 const showCreate = ref(false);
 let pollTimer: number | undefined;
 
@@ -106,7 +123,7 @@ async function startManager() {
     try {
         const success = await invoke<boolean>('start_manager');
         if (success) {
-            managerRunning.value = true;
+            managerHealth.value = 'running';
             await loadTasks();
         } else {
             alert('Manager 启动失败，请手动检查');
@@ -120,9 +137,8 @@ async function loadTasks(silent = false) {
     if (silent !== true) loading.value = true;
     error.value = '';
     try {
-        const running = await invoke<boolean>('is_manager_running');
-        managerRunning.value = running;
-        if (!running) {
+        managerHealth.value = await invoke<ManagerHealth>('is_manager_running');
+        if (managerHealth.value !== 'running') {
             tasks.value = [];
             return;
         }
@@ -187,6 +203,11 @@ onUnmounted(() => {
     padding: 16px 20px;
     margin-bottom: 16px;
     border: 1px solid #ffe0b2;
+}
+
+.manager-warning.unhealthy {
+    background: #fff8e1;
+    border-color: #ffe082;
 }
 
 .warning-content {

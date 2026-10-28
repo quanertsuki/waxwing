@@ -32,6 +32,13 @@ function memoryRuntime(records = new Map()) {
       events.push(['sendClose', id]);
       return null;
     },
+    abortClose(id) {
+      const rec = records.get(id);
+      if (!rec || !rec.closing) return false;
+      rec.closing = false;
+      events.push(['abortClose', id]);
+      return true;
+    },
     waitForExit: async id => {
       events.push(['waitForExit', id]);
       return true;
@@ -166,6 +173,75 @@ test('stop with a live runtime persists stopping before confirming exit and merg
     assert.equal(result.task.output, 'latest');
     assert.equal(result.task.error, 'test');
     assert.equal(runtime.has(task.id), false);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('a failed terminal save after exit keeps the handle and allows another stop', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, (file, value) => {
+      fs.mkdirSync(path.dirname(file), {recursive: true});
+      fs.writeFileSync(file, JSON.stringify(value));
+    });
+    const task = {id: 'task-0123456789ab', status: 'awaiting_review', rounds: []};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const records = new Map([[task.id, {w: {pid: 7}, closing: false}]]);
+    const runtime = memoryRuntime(records);
+    runtime.waitForExit = async () => true;
+    let failFinal = true;
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save: value => {
+        if (failFinal && value.status === 'cancelled') throw new Error('disk full');
+        return repository.save(value);
+      },
+      acceptance: {report: () => ({hash: 'report-hash'})},
+    });
+
+    await assert.rejects(() => transaction.stop(task.id), /disk full/);
+    assert.equal(repository.peek(task.id).status, 'stopping');
+    assert.equal(runtime.has(task.id), true, 'the handle must survive a failed final save');
+    assert.equal(records.get(task.id).closing, false, 'the close attempt must be retryable');
+
+    failFinal = false;
+    const result = await transaction.stop(task.id);
+    assert.equal(result.task.status, 'cancelled');
+    assert.equal(result.task.reportHash, undefined);
+    assert.equal(runtime.has(task.id), false);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('a close error is persisted before the handle is forgotten', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, (file, value) => {
+      fs.mkdirSync(path.dirname(file), {recursive: true});
+      fs.writeFileSync(file, JSON.stringify(value));
+    });
+    const task = {id: 'task-0123456789ab', status: 'awaiting_review', rounds: []};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const records = new Map([[task.id, {w: {pid: 7}, closing: false}]]);
+    const runtime = memoryRuntime(records);
+    runtime.waitForExit = async () => true;
+    runtime.closeError = () => 'harness close failed';
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save: value => repository.save(value),
+    });
+
+    await assert.rejects(() => transaction.stop(task.id, {closed: true}),
+      /runtime cleanup failed: harness close failed/);
+    assert.equal(repository.peek(task.id).status, 'failed');
+    assert.match(repository.peek(task.id).error, /runtime cleanup failed/);
+    assert.equal(runtime.has(task.id), false, 'a confirmed exit may release the handle');
   } finally {
     fs.rmSync(root, {recursive: true, force: true});
   }

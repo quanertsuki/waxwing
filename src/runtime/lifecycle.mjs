@@ -1,3 +1,4 @@
+import {RuntimeCloseOutcome} from './close-outcome.mjs';
 import {terminateVerifiedRuntime} from './identity.mjs';
 
 const MANUAL_RETAINED = 'locked-unverified';
@@ -16,9 +17,11 @@ export class RuntimeLifecycle {
   constructor({
     terminate = record => terminateVerifiedRuntime(record),
     now = () => new Date().toISOString(),
+    closeOutcome = null,
   } = {}) {
     this.terminate = terminate;
     this.now = now;
+    this.closeOutcome = closeOutcome ?? new RuntimeCloseOutcome({now});
   }
 
   /**
@@ -44,7 +47,16 @@ export class RuntimeLifecycle {
     const reason = typeof identity.reason === 'string' ? identity.reason : null;
     if (identity.verified === true) {
       try {
-        this.terminate(runtime);
+        const verdict = this.terminate(runtime, {identity}) ?? {};
+        if (verdict.terminated !== true) {
+          return this.#project(task, runtime, {
+            at,
+            phase: 'recovery-failed',
+            manualActionRequired: true,
+            reason: verdict.reason ?? 'termination was not confirmed',
+            decision: 'termination-failed',
+          });
+        }
         return this.#project(task, runtime, {
           at,
           phase: 'recovered-terminated',
@@ -87,38 +99,7 @@ export class RuntimeLifecycle {
    * after exit itself is confirmed.
    */
   exit({task, exitConfirmed, closeError = null} = {}) {
-    if (!task || typeof task !== 'object') throw new Error('task record is required');
-    if (exitConfirmed !== true) {
-      return {
-        task,
-        decision: 'exit-unconfirmed',
-        releaseHandle: false,
-        workspaceRetained: true,
-        error: `Task ${task.id}: could not confirm worker exit; data and workspace lock retained`,
-      };
-    }
-    if (closeError) {
-      const failed = {
-        ...task,
-        status: 'failed',
-        error: `Task ${task.id} runtime cleanup failed: ${closeError}`,
-        updatedAt: this.now(),
-      };
-      return {
-        task: failed,
-        decision: 'cleanup-failed',
-        releaseHandle: true,
-        workspaceRetained: true,
-        error: failed.error,
-      };
-    }
-    return {
-      task,
-      decision: 'exited',
-      releaseHandle: true,
-      workspaceRetained: true,
-      error: null,
-    };
+    return this.closeOutcome.project({task, exitConfirmed, closeError});
   }
 
   #project(task, runtime, {at, phase, manualActionRequired, reason, decision}) {

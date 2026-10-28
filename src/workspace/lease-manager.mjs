@@ -11,6 +11,14 @@ import {
 import {pathsOverlap} from '../../prototype/common.mjs';
 
 const MODES = new Set(['auto', 'worktree', 'shared']);
+const DEFAULT_GIT = {
+  createWorktree,
+  gitDiff,
+  gitStatus,
+  inspectGitWorkspace,
+  removeWorktree,
+  rollbackWorktree,
+};
 
 function codedError(code, message) {
   const error = new Error(`${code}: ${message}`);
@@ -28,6 +36,7 @@ export class WorkspaceLeaseManager {
     this.worktreeContainerName = options.worktreeContainerName
       ?? options.worktreeParentName
       ?? '.waxwing-worktrees';
+    this.git = {...DEFAULT_GIT, ...(options.git ?? {})};
   }
 
   /**
@@ -49,7 +58,7 @@ export class WorkspaceLeaseManager {
 
   plan({workspace, mode = this.defaultMode, taskId}) {
     if (!MODES.has(mode)) throw new Error('workspaceMode must be one of auto, worktree, shared');
-    const repository = inspectGitWorkspace(workspace);
+    const repository = this.git.inspectGitWorkspace(workspace);
     const requestedWorktree = mode === 'worktree';
     const shouldWorktree = requestedWorktree || (mode === 'auto' && repository.isGit);
 
@@ -117,7 +126,7 @@ export class WorkspaceLeaseManager {
    * accidentally create a worktree before checking occupancy, and any failure
    * after creation is rolled back here rather than in the manager.
    */
-  acquire({workspace, mode = this.defaultMode, taskId, conflictFor = () => null}, {deferRollback = false} = {}) {
+  acquire({workspace, mode = this.defaultMode, taskId, conflictFor = () => null}) {
     const plan = this.plan({workspace, mode, taskId});
     const conflict = conflictFor(plan.executionWorkspace)
       ?? (plan.mode === 'worktree' ? conflictFor(plan.sourceWorkspace) : null);
@@ -132,9 +141,9 @@ export class WorkspaceLeaseManager {
       lease = this.materialize(plan);
       return {plan, lease};
     } catch (error) {
-      if (!deferRollback) {
-        try { this.rollback(lease ?? plan.lease); } catch {}
-      }
+      // Materialization only creates. Compensation belongs here, once, so a
+      // caller never has to infer whether a rollback already happened.
+      try { this.rollback(lease ?? plan.lease); } catch {}
       throw error;
     }
   }
@@ -150,24 +159,23 @@ export class WorkspaceLeaseManager {
       };
     }
     const lease = {...plan.lease, status: 'active', createdAt: new Date().toISOString()};
-    createWorktree({
+    this.git.createWorktree({
       repoRoot: lease.repoRoot,
       worktreePath: lease.worktreePath,
       branch: lease.branch,
       baseCommit: lease.baseCommit,
     });
     if (!fs.existsSync(plan.executionWorkspace)) {
-      rollbackWorktree(lease);
       throw codedError('WORKTREE_PATH_MISSING', `worktree subdirectory was not created: ${plan.executionWorkspace}`);
     }
     return lease;
   }
 
   rollback(lease) {
-    if (lease?.mode === 'worktree' && lease.status !== 'removed') {
-      rollbackWorktree(lease);
-      lease.status = 'rolled_back';
-    }
+    if (lease?.mode !== 'worktree') return;
+    if (lease.status === 'rolled_back' || lease.status === 'removed') return;
+    this.git.rollbackWorktree(lease);
+    lease.status = 'rolled_back';
   }
 
   cleanup(lease) {
@@ -177,7 +185,17 @@ export class WorkspaceLeaseManager {
     if (lease.status === 'removed') {
       return {removed: false, reason: 'worktree already removed', branchRetained: true, branch: lease.branch};
     }
-    const result = removeWorktree({repoRoot: lease.repoRoot, worktreePath: lease.worktreePath});
+    if (lease.status === 'locked-unverified') {
+      return {
+        removed: false,
+        reason: 'Runtime identity is unverified; resolve the residual process manually before cleaning the worktree',
+        manualActionRequired: true,
+        branchRetained: true,
+        branch: lease.branch,
+        workspacePath: lease.worktreePath,
+      };
+    }
+    const result = this.git.removeWorktree({repoRoot: lease.repoRoot, worktreePath: lease.worktreePath});
     if (result.removed) lease.status = 'removed';
     return {
       ...result,
@@ -195,6 +213,11 @@ export class WorkspaceLeaseManager {
   release({task, live = false}) {
     if (task?.status !== 'closed') throw new Error('Close the task before cleaning its worktree');
     if (live) throw new Error('Runtime exit is not confirmed; worktree retained');
+    const manual = task.runtime?.manualActionRequired === true
+      || task.workspaceLease?.status === 'locked-unverified';
+    if (manual) {
+      throw new Error('Runtime identity is unverified; resolve the residual process manually before cleaning the worktree');
+    }
     return this.cleanup(task.workspaceLease);
   }
 
@@ -232,8 +255,8 @@ export class WorkspaceLeaseManager {
       worktreePath: lease.worktreePath,
       branch: lease.branch,
       baseCommit: lease.baseCommit,
-      status: gitStatus(pathToInspect),
-      diff: gitDiff(pathToInspect),
+      status: this.git.gitStatus(pathToInspect),
+      diff: this.git.gitDiff(pathToInspect),
       missing: false,
       lease,
     };
