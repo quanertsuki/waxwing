@@ -32,8 +32,8 @@ and uses semantic versioning for public releases.
   2.12.4
 - npm package, desktop package, Rust crate, and Windows bundle metadata
   attribute the release to `quanertsuki`
-- Installation docs point to the verified v0.1.0 tarball until npm registry
-  publication is complete
+- The npm package is published as `@quanernya/waxwing@0.1.0` and installs the
+  `waxwing` and `waxwing-mcp` commands
 
 ### Fixed
 

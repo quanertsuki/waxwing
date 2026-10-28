@@ -12,12 +12,15 @@ flowchart LR
 
   subgraph Manager["Local manager: single state owner"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
+    TaskCmd["TaskCommand<br/>create/rework/preflight"]
+    Outcome["RuntimeOutcome<br/>terminal/fallback/ack-timeout"]
     Runtime["Runtime<br/>round IDs + heartbeat + recovery"]
     Supervisor["RuntimeSupervisor<br/>release + exit gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
     Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
-    Research["ResearchBatchService<br/>parallel scratch shards + report"]
-    Usage["UsageService<br/>metrics; limits opt-in"]
+    Research["ResearchBatchService + ResearchState<br/>parallel scratch shards + report"]
+    Usage["UsageModule<br/>indexing, limits, override, rework"]
+    TaskView["TaskView<br/>bounded read contract"]
     Providers["ProviderRegistry<br/>DSH SDK + OpenAI-compatible"]
   end
 
@@ -40,18 +43,25 @@ flowchart LR
   MCP --> Gateway
   Desktop --> Gateway
 
+  Gateway --> TaskCmd
+  Gateway --> TaskView
   Gateway --> Tasks
   Gateway --> Acceptance
   Gateway --> Research
   Gateway --> Usage
+  TaskCmd --> Tasks
+  Tasks <--> Outcome
   Tasks <--> Runtime
   Runtime --> Supervisor
   Tasks <--> Lease
   Tasks <--> Data
   Acceptance --> Data
   Research --> Tasks
+  Research --> Usage
   Research --> Scratch
   Research --> Data
+  Usage --> Data
+  Usage --> Tasks
   Runtime --> Data
 
   Runtime --> Protocol
