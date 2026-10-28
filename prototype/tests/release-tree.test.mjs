@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {
   checkReleaseTree,
   findMachineSpecificPath,
+  packagedRequired,
   required,
   walk,
 } from '../../scripts/check-release-tree.mjs';
@@ -58,6 +59,27 @@ test('the release check scans files for machine-specific paths', () => {
   assert.equal(findMachineSpecificPath(`workspace: ${posixHome}`), true);
   assert.equal(findMachineSpecificPath(`workspace: ${portable}`), false);
   assert.equal(findMachineSpecificPath(`workspace: ${portableOtherDrive}`), false);
+});
+
+test('an installed package is checked against the subset it ships', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-release-tree-pkg-'));
+  try {
+    for (const file of packagedRequired) {
+      const target = path.join(root, file);
+      fs.mkdirSync(path.dirname(target), {recursive: true});
+      fs.writeFileSync(target, '');
+    }
+    assert.ok(!packagedRequired.includes('desktop/src-tauri/src/tasks.rs'));
+    assert.ok(packagedRequired.includes('prototype/manager.mjs'));
+    const clean = checkReleaseTree({root, releaseFiles: walk(root), packaged: true});
+    assert.deepEqual(clean.errors, []);
+
+    fs.writeFileSync(path.join(root, 'server-token'), '');
+    const leaked = checkReleaseTree({root, releaseFiles: walk(root), packaged: true});
+    assert.ok(leaked.errors.includes('forbidden release path: server-token'));
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
 });
 
 test('npm command entries point at packaged files without path prefixes', () => {
