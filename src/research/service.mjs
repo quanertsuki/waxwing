@@ -8,11 +8,14 @@ import {
   isTerminalBatch,
   shardTransition,
 } from './state.mjs';
+import {
+  BATCH_ID,
+  ResearchRepository,
+  SHARD_ID,
+} from './repository.mjs';
+import {ResearchCapture} from './capture.mjs';
+import {ResearchReport} from './report.mjs';
 
-const BATCH_ID = /^research-[a-f0-9]{12}$/;
-const SHARD_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const DEFAULT_PAGE_LIMIT = 2000;
-const MAX_PAGE_LIMIT = 4000;
 const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
 
@@ -28,20 +31,6 @@ function optionalText(value, label, maxLength = 100000) {
   return requireText(value, label, maxLength);
 }
 
-function safeOffset(value) {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error('offset must be a non-negative safe integer');
-  }
-  return value;
-}
-
-function safeLimit(value) {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > MAX_PAGE_LIMIT) {
-    throw new Error(`limit must be a safe integer between 1 and ${MAX_PAGE_LIMIT}`);
-  }
-  return value;
-}
-
 function waitSeconds(value) {
   if (value === undefined) return DEFAULT_WAIT_SECONDS;
   if (typeof value !== 'number' || !Number.isSafeInteger(value) ||
@@ -49,21 +38,6 @@ function waitSeconds(value) {
     throw new Error(`timeoutSeconds must be an integer between 1 and ${MAX_WAIT_SECONDS}`);
   }
   return value;
-}
-
-function pageOf(value, offset, limit) {
-  const total = value.length;
-  if (offset > total) throw new Error(`offset ${offset} exceeds text length ${total}`);
-  let end = Math.min(total, offset + limit);
-  if (end < total && end > offset && /[\uD800-\uDBFF]/.test(value[end - 1])) end -= 1;
-  const nextOffset = end < total ? end : null;
-  return {
-    text: value.slice(offset, end),
-    totalChars: total,
-    offset,
-    limit,
-    nextOffset,
-  };
 }
 
 function preview(value, limit = 240) {
@@ -134,14 +108,13 @@ export class ResearchBatchService {
     now = () => new Date().toISOString(),
     makeId = () => `research-${randomUUID().replaceAll('-', '').slice(0, 12)}`,
     digestText = digest,
+    files = fs,
   }) {
     if (typeof atomicJson !== 'function') throw new Error('atomicJson dependency is required');
     if (typeof createTask !== 'function') throw new Error('createTask dependency is required');
     if (typeof getTask !== 'function') throw new Error('getTask dependency is required');
-    this.batchesDir = path.resolve(batchesDir);
     this.scratchRoot = path.resolve(scratchRoot);
     this.reportsDir = path.resolve(reportsDir);
-    this.atomicJson = atomicJson;
     this.createTask = createTask;
     this.getTask = getTask;
     this.closeTask = closeTask;
@@ -151,16 +124,21 @@ export class ResearchBatchService {
     this.now = now;
     this.makeId = makeId;
     this.digestText = digestText;
-    this.batches = new Map();
+    this.files = files;
+    this.repository = new ResearchRepository({batchesDir, atomicJson, files, now});
+    this.capture = new ResearchCapture({repository: this.repository, files});
+    this.report = new ResearchReport({
+      reportsDir, repository: this.repository, files, digestText,
+    });
+    this.refreshing = new Map();
   }
 
   batchDirectory(id) {
-    if (!BATCH_ID.test(id ?? '')) throw new Error('Invalid research batch ID');
-    return path.join(this.batchesDir, id);
+    return this.repository.batchDirectory(id);
   }
 
   batchFile(id) {
-    return path.join(this.batchDirectory(id), 'batch.json');
+    return this.repository.batchFile(id);
   }
 
   workspaceFor(batchId, shardId) {
@@ -170,51 +148,27 @@ export class ResearchBatchService {
   }
 
   resultFile(batchId, shardId) {
-    return path.join(this.batchDirectory(batchId), 'shards', `${shardId}.md`);
+    return this.repository.resultFile(batchId, shardId);
   }
 
   errorFile(batchId, shardId) {
-    return path.join(this.batchDirectory(batchId), 'shards', `${shardId}.error.txt`);
+    return this.repository.errorFile(batchId, shardId);
   }
 
   reportFile(id) {
-    return path.join(this.reportsDir, `${id}.md`);
+    return this.report.file(id);
   }
 
   save(batch) {
-    batch.updatedAt = this.now();
-    this.batches.set(batch.id, batch);
-    this.atomicJson(this.batchFile(batch.id), batch);
-    return batch;
+    return this.repository.save(batch);
   }
 
   load(id) {
-    if (this.batches.has(id)) return this.batches.get(id);
-    const file = this.batchFile(id);
-    const batch = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (batch.id !== id) throw new Error(`Research batch ID mismatch in ${file}`);
-    this.batches.set(id, batch);
-    return batch;
+    return this.repository.load(id);
   }
 
   restore() {
-    if (!fs.existsSync(this.batchesDir)) return 0;
-    let count = 0;
-    for (const name of fs.readdirSync(this.batchesDir)) {
-      if (!BATCH_ID.test(name)) continue;
-      const file = this.batchFile(name);
-      if (!fs.existsSync(file)) continue;
-      try {
-        const batch = JSON.parse(fs.readFileSync(file, 'utf8'));
-        if (batch.id === name) {
-          this.batches.set(name, batch);
-          count += 1;
-        }
-      } catch {
-        // A damaged batch never prevents the rest of the manager from loading.
-      }
-    }
-    return count;
+    return this.repository.restore();
   }
 
   counts(batch) {
@@ -247,7 +201,9 @@ export class ResearchBatchService {
         taskStatus: shard.taskStatus ?? null,
         workspace: shard.workspace ?? null,
         error: shard.error ? preview(shard.error) : null,
+        captureError: shard.captureError ? preview(shard.captureError) : null,
         cleanupError: shard.cleanupError ? preview(shard.cleanupError) : null,
+        orphaned: Boolean(shard.orphaned),
       })),
     };
   }
@@ -293,12 +249,12 @@ export class ResearchBatchService {
       reportHash: null,
       shards: shards.map(shard => ({...shard, status: 'planned', taskId: null, taskStatus: null})),
     };
-    fs.mkdirSync(this.batchDirectory(id), {recursive: true});
+    this.files.mkdirSync(this.batchDirectory(id), {recursive: true});
     this.save(batch);
 
     const results = await Promise.allSettled(batch.shards.map(async shard => {
       const workspace = this.workspaceFor(batch.id, shard.id);
-      fs.mkdirSync(workspace, {recursive: true});
+      this.files.mkdirSync(workspace, {recursive: true});
       shard.workspace = workspace;
       const prompt = researchPrompt({question, commonPrompt, shard});
       const taskArgs = {
@@ -332,38 +288,24 @@ export class ResearchBatchService {
   }
 
   async captureTerminal(batch, shard, task) {
-    if (shard.resultCaptured) return;
-    let resultText = task.output || task.rounds?.at(-1)?.result?.text || '';
-    const workspaceResult = shard.workspace ? path.join(shard.workspace, 'research-result.md') : null;
-    if (!resultText && workspaceResult && fs.existsSync(workspaceResult)) {
-      resultText = fs.readFileSync(workspaceResult, 'utf8');
-    }
-    if (resultText) {
-      const file = this.resultFile(batch.id, shard.id);
-      fs.mkdirSync(path.dirname(file), {recursive: true});
-      fs.writeFileSync(file, resultText);
-    }
-    const finishReason = task.finishReason ?? task.rounds?.at(-1)?.result?.finishReason ?? null;
-    if (task.status === 'cancelled') {
-      shard.status = 'cancelled';
-      shard.error = task.error ?? 'Research shard cancelled';
-    } else if (task.status === 'failed' || finishReason === 'error') {
-      shard.status = 'failed';
-      shard.error = task.error ?? 'Research shard failed without an error message';
-      if (task.error) {
-        const file = this.errorFile(batch.id, shard.id);
-        fs.mkdirSync(path.dirname(file), {recursive: true});
-        fs.writeFileSync(file, task.error);
-      }
-    } else {
-      shard.status = 'completed';
-      shard.error = null;
-    }
-    shard.resultCaptured = true;
-    shard.tasksAtCapture = task.status;
+    return this.capture.capture(batch, shard, task);
   }
 
+  /**
+   * One in-flight refresh per batch. Concurrent status/wait/collect calls share
+   * it, so a shard runtime is closed at most once even when callers overlap.
+   */
   async refresh(batch) {
+    const active = this.refreshing.get(batch.id);
+    if (active) return active;
+    const running = this.#refresh(batch).finally(() => {
+      if (this.refreshing.get(batch.id) === running) this.refreshing.delete(batch.id);
+    });
+    this.refreshing.set(batch.id, running);
+    return running;
+  }
+
+  async #refresh(batch) {
     let dirty = false;
     for (const shard of batch.shards) {
       if (!shard.taskId) continue;
@@ -373,7 +315,18 @@ export class ResearchBatchService {
       dirty ||= transition.dirty;
       if (!task) continue;
       if (transition.capture) {
-        await this.captureTerminal(batch, shard, task);
+        try {
+          await this.capture.capture(batch, shard, task);
+          shard.captureError = null;
+        } catch (error) {
+          // One unreadable or unwritable shard must not fail the whole batch.
+          shard.captureError = error.message ?? String(error);
+          shard.error = `capture failed: ${shard.captureError}`;
+          shard.status = 'failed';
+          shard.resultCaptured = true;
+          shard.tasksAtCapture = task.status;
+        }
+        dirty = true;
       }
       if (transition.finalize) {
         if (typeof this.closeTask === 'function') {
@@ -472,37 +425,7 @@ export class ResearchBatchService {
   }
 
   reportContent(batch) {
-    const sections = batch.shards.map(shard => {
-      const resultFile = this.resultFile(batch.id, shard.id);
-      const errorFile = this.errorFile(batch.id, shard.id);
-      const result = fs.existsSync(resultFile) ? fs.readFileSync(resultFile, 'utf8').trim() : '';
-      const error = shard.error || (fs.existsSync(errorFile) ? fs.readFileSync(errorFile, 'utf8').trim() : '');
-      return [
-        `## ${shard.subject}`,
-        '',
-        `- Shard: ${shard.id}`,
-        `- Status: ${shard.status}`,
-        `- Task: ${shard.taskId ?? '(not created)'}`,
-        shard.url ? `- Source: ${shard.url}` : null,
-        shard.workspace ? `- Scratch workspace: ${shard.workspace}` : null,
-        '',
-        result || '_No result captured._',
-        error ? `\n### Error\n\n${error}` : null,
-      ].filter(value => value !== null && value !== undefined).join('\n');
-    });
-    return [
-      `# Waxwing research: ${batch.title}`,
-      '',
-      batch.question,
-      '',
-      `- Batch: ${batch.id}`,
-      `- Status: ${batch.status}`,
-      `- Created: ${batch.createdAt}`,
-      `- Shards: ${batch.shards.length}`,
-      '',
-      sections.join('\n\n'),
-      '',
-    ].join('\n');
+    return this.report.content(batch);
   }
 
   async collect(id, options = {}) {
@@ -512,22 +435,16 @@ export class ResearchBatchService {
     if (counts.planned + counts.running > 0 || batch.status === 'finalizing') {
       throw new Error(`Research batch is still active: ${counts.running} running, ${counts.planned} planned, ${batch.status === 'finalizing' ? 'finalizing' : 'ready'}`);
     }
-    const content = this.reportContent(batch);
-    const hash = this.digestText(content);
-    const file = this.reportFile(batch.id);
-    fs.mkdirSync(path.dirname(file), {recursive: true});
-    fs.writeFileSync(file, content);
-    if (batch.reportHash !== hash) {
-      batch.reportHash = hash;
+    const collected = this.report.collect(batch, options);
+    if (batch.reportHash !== collected.reportHash) {
+      batch.reportHash = collected.reportHash;
       this.save(batch);
     }
-    const offset = options.offset === undefined ? 0 : safeOffset(options.offset);
-    const limit = options.limit === undefined ? DEFAULT_PAGE_LIMIT : safeLimit(options.limit);
     return {
       ...this.summary(batch),
-      report: file,
-      reportHash: hash,
-      ...pageOf(content, offset, limit),
+      report: collected.file,
+      reportHash: collected.reportHash,
+      ...collected.page,
     };
   }
 }

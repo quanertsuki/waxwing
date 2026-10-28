@@ -87,6 +87,39 @@ test('RuntimeOutcomeSettlement reports fallback lookup errors and never mutates 
   assert.equal(source.rounds[0].result, undefined);
 });
 
+test('RuntimeOutcomeSettlement projects startup, fallback, and stop failures', () => {
+  const service = settlement();
+  const start = service.startFailed({
+    task: task(),
+    message: 'Task task-0123456789ab failed to start: fork failed; runtime exit not confirmed (process may still be running)',
+    runtimeUnconfirmed: true,
+  });
+  assert.equal(start.task.status, 'failed');
+  assert.match(start.task.error, /failed to start: fork failed/);
+  assert.equal(start.event.kind, 'start_failed');
+  assert.equal(start.event.runtimeUnconfirmed, true);
+
+  const fallback = service.fallbackFailed({
+    task: task(),
+    providerName: 'fallback',
+    message: 'Fallback to fallback also failed: quota',
+  });
+  assert.equal(fallback.task.status, 'failed');
+  assert.equal(fallback.task.error, 'Fallback to fallback also failed: quota');
+  assert.equal(fallback.event.kind, 'provider_fallback_failed');
+  assert.equal(fallback.event.provider, 'fallback');
+
+  const stop = service.stopFailed({
+    task: task(),
+    timeoutMs: 2000,
+    message: 'Task task-0123456789ab timed out, but stopping it failed: exit pending',
+  });
+  assert.equal(stop.task.status, 'failed');
+  assert.equal(stop.task.error, 'Task task-0123456789ab timed out, but stopping it failed: exit pending');
+  assert.equal(stop.event.kind, 'round_stop_failed');
+  assert.equal(stop.event.timeoutMs, 2000);
+});
+
 test('RuntimeOutcomeSettlement emits explicit protocol failures', () => {
   const service = settlement();
   const missing = service.missingTerminal({

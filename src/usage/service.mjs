@@ -1,5 +1,7 @@
 // Usage metrics and optional cumulative thresholds. Limits stay disabled
 // unless the task or configuration explicitly opts in.
+import {UsageModule} from './module.mjs';
+
 export {
   usageForList,
   usageForStatus,
@@ -8,28 +10,32 @@ export {
 } from '../../prototype/usage.mjs';
 
 /**
- * Small service facade for adapters that should not depend on the legacy
- * module path. The implementation remains compatible with event files written
- * by earlier 0.1 previews.
+ * Compatibility facade for 0.1 adapters. New callers use `UsageModule`
+ * directly; this class keeps the old construction shape working and gives it
+ * the same never-throw behaviour.
+ *
+ * @deprecated Use `UsageModule`; this export remains through 0.1.x.
  */
 export class UsageService {
-  constructor(operations) {
-    this.operations = operations;
+  constructor(operations = {}) {
+    this.module = operations instanceof UsageModule
+      ? operations
+      : new UsageModule({operations});
   }
 
   snapshot(task, taskDirectory, options = {}) {
-    return this.operations.usageForTask(task, taskDirectory, options);
+    return this.module.snapshot(task, taskDirectory, options);
   }
 
   list(task, taskDirectory) {
-    return this.operations.usageForList(task, taskDirectory);
+    return this.module.list(task, taskDirectory);
   }
 
   status(task, taskDirectory) {
-    return this.operations.usageForStatus(task, taskDirectory);
+    return this.module.status(task, taskDirectory);
   }
 
   view(task, taskDirectory) {
-    return this.operations.usageForView(task, taskDirectory);
+    return this.module.view(task, taskDirectory);
   }
 }

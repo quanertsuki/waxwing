@@ -9,7 +9,7 @@
             <div v-if="loading" class="loading">加载中...</div>
             <div v-else-if="error" class="error">{{ error }}</div>
 
-            <template v-else>
+            <template v-else-if="detail">
                 <div class="detail-section">
                     <h4>基本信息</h4>
                     <div class="info-grid">

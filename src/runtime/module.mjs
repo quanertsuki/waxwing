@@ -70,6 +70,9 @@ export class Runtime {
     this.hooks = hooks;
     this.supervisor = options.supervisor ?? new RuntimeSupervisor();
     this.records = new Map();
+    // A worker can report a close error and exit immediately; keep that fact
+    // until the close transaction has persisted its outcome.
+    this.closeErrors = new Map();
   }
 
   // --- identity state --------------------------------------------------------
@@ -82,7 +85,12 @@ export class Runtime {
     const rec = this.records.get(id);
     if (rec && this.supervisor.hasExited(rec)) {
       this.records.delete(id);
+      this.closeErrors.delete(id);
       return true;
+    }
+    if (!rec) {
+      this.closeErrors.delete(id);
+      return false;
     }
     return false;
   }
@@ -121,6 +129,17 @@ export class Runtime {
     return true;
   }
 
+  /**
+   * Undo a close attempt that failed before the terminal record was durable,
+   * so the caller can retry instead of being stuck behind `Already stopping`.
+   */
+  abortClose(id) {
+    const rec = this.records.get(id);
+    if (!rec || !rec.closing) return false;
+    rec.closing = false;
+    return true;
+  }
+
   /** Ask the owned process to close. Returns the error when the request cannot be sent. */
   sendClose(id) {
     const rec = this.records.get(id);
@@ -129,12 +148,17 @@ export class Runtime {
       if (rec.w.connected) rec.w.send({kind: 'close'});
       return null;
     } catch (error) {
-      rec.closeError = rec.closeError ?? `close request failed: ${error.message}`;
+      const detail = `close request failed: ${error.message}`;
+      rec.closeError = rec.closeError ?? detail;
+      this.closeErrors.set(id, rec.closeError);
       return error;
     }
   }
 
-  closeError(id) { return this.records.get(id)?.closeError ?? null; }
+  /** Survives process exit so a late or final close error is never lost. */
+  closeError(id) {
+    return this.closeErrors.get(id) ?? this.records.get(id)?.closeError ?? null;
+  }
 
   // --- round lifecycle -------------------------------------------------------
   /** Health is runtime state, so it is persisted and evented through the same hooks. */
@@ -228,6 +252,7 @@ export class Runtime {
       identityVerified: false,
     };
     this.records.set(task.id, rec);
+    this.closeErrors.delete(task.id);
     task.runtimeHealth = rec.health;
     try { this.persist(task, rec); } catch {}
     for (const stream of [handle.stdout, handle.stderr]) {
@@ -323,7 +348,10 @@ export class Runtime {
       return;
     }
 
-    if (msg.kind === 'close_error') rec.closeError = msg.error;
+    if (msg.kind === 'close_error') {
+      rec.closeError = msg.error;
+      this.closeErrors.set(taskId, msg.error);
+    }
 
     if (msg.kind === 'result' || msg.kind === 'error') {
       if (rec.terminalMessage) {

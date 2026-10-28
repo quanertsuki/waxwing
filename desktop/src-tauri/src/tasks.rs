@@ -1,4 +1,5 @@
 use crate::paths;
+use crate::transport::{clamp_page_limit, error_message, health_from_result, ManagerHealth};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
@@ -10,9 +11,17 @@ use std::process::Stdio;
 pub struct TaskUsage {
     pub requests: usize,
     #[serde(default)]
+    pub available: Option<bool>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
     pub estimated_cost_cny: Option<f64>,
     #[serde(default)]
     pub cost_complete: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,8 +52,18 @@ pub struct Task {
     #[serde(default)]
     pub cleanup_authorized: Option<bool>,
     pub summary: String,
+    #[serde(default)]
+    pub summary_truncated: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_truncated: bool,
     pub live: bool,
     pub accepted: bool,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub last_round: Option<u32>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
     #[serde(default)]
@@ -53,6 +72,12 @@ pub struct Task {
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub batch_id: Option<String>,
+    #[serde(default)]
+    pub shard_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,6 +120,10 @@ pub struct TaskDetailUsage {
     pub estimated_cost_cny: Option<f64>,
     #[serde(default)]
     pub cost_complete: Option<bool>,
+    #[serde(default)]
+    pub limit_state: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -136,17 +165,31 @@ pub struct TaskDetail {
     #[serde(default)]
     pub runtime_health: Option<String>,
     #[serde(default)]
+    pub runtime_phase: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub runtime: Option<TaskRuntime>,
     #[serde(default)]
     pub rework_blocked_reason: Option<String>,
     #[serde(default)]
     pub last_round: Option<TaskRound>,
     #[serde(default)]
+    pub last_event: Option<serde_json::Value>,
+    #[serde(default)]
     pub usage: Option<TaskDetailUsage>,
     #[serde(default)]
     pub usage_rounds: Vec<serde_json::Value>,
     #[serde(default)]
     pub result_preview: Option<String>,
+    #[serde(default)]
+    pub result_preview_chars: Option<usize>,
+    #[serde(default)]
+    pub result_total_chars: Option<usize>,
+    #[serde(default)]
+    pub result_preview_complete: Option<bool>,
+    #[serde(default)]
+    pub result_preview_truncated: Option<bool>,
     #[serde(default)]
     pub result_finish_reason: Option<String>,
     #[serde(default)]
@@ -204,8 +247,9 @@ async fn manager_request(
         .map_err(|e| format!("Manager request failed: {}", e))?;
 
     if !response.status().is_success() {
+        let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Manager error: {}", body));
+        return Err(error_message(status, &body));
     }
 
     response
@@ -229,24 +273,19 @@ pub async fn get_task_detail(id: String) -> Result<TaskDetail, String> {
 }
 
 #[tauri::command]
-pub async fn get_task_usage(id: String) -> Result<serde_json::Value, String> {
-    manager_request("status", serde_json::json!({"id": id, "view": "usage"})).await
-}
-
-#[tauri::command]
 pub async fn get_task_view(
     id: String,
     view: String,
-    offset: Option<u32>,
-    limit: Option<u32>,
+    offset: Option<i64>,
+    limit: Option<i64>,
 ) -> Result<serde_json::Value, String> {
     manager_request(
         "status",
         serde_json::json!({
             "id": id,
             "view": view,
-            "offset": offset.unwrap_or(0),
-            "limit": limit.unwrap_or(2000)
+            "offset": offset.unwrap_or(0).max(0),
+            "limit": clamp_page_limit(limit)
         }),
     )
     .await
@@ -287,12 +326,11 @@ pub async fn accept_task(id: String, evidence: String) -> Result<serde_json::Val
 }
 
 #[tauri::command]
-pub async fn is_manager_running() -> Result<bool, String> {
-    // Use a short-timeout TCP connect check; if the port is taken the manager is up.
-    // Reading the token also fails when no manager has written it yet.
+pub async fn is_manager_running() -> Result<ManagerHealth, String> {
+    // Reading the token fails when no manager has written it yet.
     let token = match read_server_token() {
         Ok(t) if !t.is_empty() => t,
-        _ => return Ok(false),
+        _ => return Ok(ManagerHealth::NotRunning),
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -305,12 +343,19 @@ pub async fn is_manager_running() -> Result<bool, String> {
         .json(&serde_json::json!({"action": "health", "args": {}}))
         .send()
         .await;
-    Ok(response.map(|r| r.status().is_success()).unwrap_or(false))
+    let probe = match response {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            Ok((status, response.text().await.unwrap_or_default()))
+        }
+        Err(_) => Err(()),
+    };
+    Ok(health_from_result(probe))
 }
 
 #[tauri::command]
 pub async fn start_manager() -> Result<bool, String> {
-    if is_manager_running().await.unwrap_or(false) {
+    if is_manager_running().await == Ok(ManagerHealth::Running) {
         return Ok(true);
     }
 
@@ -361,7 +406,7 @@ pub async fn start_manager() -> Result<bool, String> {
         Ok(_) => {
             for _ in 0..20 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if is_manager_running().await.unwrap_or(false) {
+                if is_manager_running().await == Ok(ManagerHealth::Running) {
                     return Ok(true);
                 }
             }
@@ -378,6 +423,12 @@ pub async fn start_manager() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The checked-in fixture is generated by scripts/generate-task-contract.mjs
+    // from the real JavaScript view functions. Parsing it here fails whenever
+    // the JS contract grows a field the Rust models cannot read.
+    const CONTRACT_FIXTURE: &str =
+        include_str!("../../../prototype/tests/fixtures/task-view-contract.json");
 
     #[test]
     fn manager_entry_is_a_relative_file_name() {
@@ -469,6 +520,39 @@ mod tests {
             Some(2)
         );
         assert_eq!(detail.usage_rounds.len(), 1);
+    }
+
+    #[test]
+    fn rust_models_parse_the_committed_task_view_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(CONTRACT_FIXTURE).expect("contract fixture must be valid JSON");
+        let list: Task = serde_json::from_value(fixture["list"].clone())
+            .expect("list fixture must deserialize into Task");
+        let detail: TaskDetail = serde_json::from_value(fixture["detail"].clone())
+            .expect("detail fixture must deserialize into TaskDetail");
+
+        assert_eq!(list.id, "task-0123456789ab");
+        assert_eq!(list.summary, "bounded preview");
+        assert!(!list.summary_truncated);
+        assert_eq!(list.last_round, Some(1));
+        assert_eq!(list.effort.as_deref(), Some("high"));
+        assert_eq!(list.usage.as_ref().map(|usage| usage.requests), Some(2));
+
+        assert_eq!(detail.status_label.as_deref(), Some("待验收"));
+        assert_eq!(detail.runtime_phase.as_deref(), Some("running"));
+        assert_eq!(detail.session_id.as_deref(), Some("session-1"));
+        assert_eq!(detail.event_count, Some(7));
+        assert_eq!(detail.result_preview_chars, Some(14));
+        assert_eq!(detail.result_total_chars, Some(100));
+        assert_eq!(detail.result_preview_complete, Some(false));
+        assert_eq!(detail.result_preview_truncated, Some(true));
+        assert_eq!(
+            detail
+                .last_round
+                .as_ref()
+                .and_then(|round| round.started_at.as_deref()),
+            Some("2026-10-28T01:00:00.000Z")
+        );
     }
 
     #[test]

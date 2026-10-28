@@ -19,7 +19,7 @@
           <span>{{ detail.live ? 'Runtime live' : 'Runtime stopped' }}</span>
           <span>Round {{ detail.roundCount }}</span>
           <span v-if="detail.lastRound?.roundId || detail.roundId" class="mono">
-            {{ (detail.lastRound?.roundId || detail.roundId).slice(-12) }}
+            {{ (detail.lastRound?.roundId || detail.roundId)?.slice(-12) }}
           </span>
         </section>
 
@@ -142,7 +142,18 @@ interface TaskDetail {
   runtimeHealth?: string;
   runtime?: { pid?: number };
   reworkBlockedReason?: string;
-  lastRound?: { roundId?: string };
+  runtimePhase?: string | null;
+  sessionId?: string;
+  eventCount?: number;
+  runtimeReady?: boolean;
+  lastRound?: {
+    number: number;
+    roundId?: string;
+    startedAt?: string | null;
+    finishedAt?: string | null;
+    maxTokens?: number | null;
+    effort?: string;
+  };
   usage?: {
     available?: boolean;
     requests?: number;
@@ -159,6 +170,7 @@ interface Page {
   offset: number;
   totalChars: number;
   nextOffset: number | null;
+  complete: boolean;
 }
 
 const props = defineProps<{ taskId: string }>();
@@ -171,7 +183,7 @@ const working = ref(false);
 const evidence = ref('');
 const rework = reactive({ prompt: '', maxTokens: '' });
 const activeTab = ref('result');
-const page = reactive<Page>({ text: '', offset: 0, totalChars: 0, nextOffset: null });
+const page = reactive<Page>({ text: '', offset: 0, totalChars: 0, nextOffset: null, complete: true });
 const pageLimit = 4000;
 let pollTimer: number | undefined;
 

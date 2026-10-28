@@ -423,3 +423,27 @@ test('beginClose is idempotent so two closes cannot both request shutdown', () =
   assert.match(runtime.sendClose(task.id).message, /pipe broke/);
   assert.match(runtime.closeError(task.id), /close request failed: pipe broke/);
 });
+
+test('abortClose makes a failed close retryable', () => {
+  const {runtime, addTask} = harness();
+  const task = addTask(makeTask());
+  openAcked(runtime, task);
+  assert.equal(runtime.beginClose(task.id), true);
+  assert.equal(runtime.abortClose(task.id), true);
+  assert.equal(runtime.isClosing(task.id), false);
+  assert.equal(runtime.beginClose(task.id), true);
+});
+
+test('a close error survives process exit until the handle is forgotten', () => {
+  const {runtime, addTask} = harness();
+  const task = addTask(makeTask());
+  const {handle} = openAcked(runtime, task);
+  runtime.beginClose(task.id);
+  handle.emit('message', {kind: 'close_error', error: 'harness close failed'});
+  handle.exitWith(1);
+
+  assert.equal(runtime.has(task.id), false, 'the process exit removes the owned record');
+  assert.equal(runtime.closeError(task.id), 'harness close failed');
+  runtime.forget(task.id);
+  assert.equal(runtime.closeError(task.id), null);
+});

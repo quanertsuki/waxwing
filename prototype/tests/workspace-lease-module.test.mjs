@@ -61,6 +61,78 @@ test('acquire rolls back a partially materialized worktree when materialization 
   assert.deepEqual(rolledBack, {mode: 'worktree', status: 'planned'});
 });
 
+test('acquire compensates a partially materialized worktree exactly once', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-lease-compensate-'));
+  const calls = [];
+  const lease = {
+    mode: 'worktree',
+    status: 'planned',
+    repoRoot: root,
+    worktreePath: path.join(root, 'worktree'),
+    executionWorkspace: path.join(root, 'missing-subdirectory'),
+    branch: 'waxwing/task-0123456789ab',
+  };
+  const manager = new WorkspaceLeaseManager({
+    git: {
+      createWorktree: () => calls.push('create'),
+      rollbackWorktree: value => calls.push(`rollback:${value.status}`),
+    },
+  });
+  manager.plan = () => ({
+    mode: 'worktree',
+    sourceWorkspace: root,
+    executionWorkspace: lease.executionWorkspace,
+    lease,
+  });
+  try {
+    assert.throws(() => manager.acquire({
+      workspace: root,
+      taskId: 'task-0123456789ab',
+    }), /WORKTREE_PATH_MISSING/);
+    assert.deepEqual(calls, ['create', 'rollback:planned']);
+    assert.equal(lease.status, 'rolled_back');
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('rollback is idempotent and never repeats destructive Git work', () => {
+  let calls = 0;
+  const manager = new WorkspaceLeaseManager({
+    git: {rollbackWorktree: () => { calls += 1; }},
+  });
+  const lease = {mode: 'worktree', status: 'active'};
+  manager.rollback(lease);
+  manager.rollback(lease);
+  assert.equal(calls, 1);
+  assert.equal(lease.status, 'rolled_back');
+});
+
+test('cleanup refuses a worktree whose runtime identity is unverified', () => {
+  const manager = new WorkspaceLeaseManager({
+    git: {removeWorktree: () => { throw new Error('must not remove a locked worktree'); }},
+  });
+  const result = manager.cleanup({
+    mode: 'worktree',
+    status: 'locked-unverified',
+    branch: 'waxwing/task-0123456789ab',
+  });
+  assert.equal(result.removed, false);
+  assert.equal(result.manualActionRequired, true);
+  assert.match(result.reason, /manual/i);
+});
+
+test('release refuses a residual runtime that requires manual handling', () => {
+  const manager = new WorkspaceLeaseManager();
+  assert.throws(() => manager.release({
+    task: {
+      status: 'closed',
+      runtime: {manualActionRequired: true},
+      workspaceLease: {mode: 'worktree', status: 'locked-unverified'},
+    },
+  }), /manual/i);
+});
+
 test('conflictFor shares overlap and ownership rules for all workspace paths', () => {
   const manager = new WorkspaceLeaseManager();
   const root = path.join(os.tmpdir(), 'waxwing-overlap');

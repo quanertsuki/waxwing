@@ -36,6 +36,24 @@ test('a live PID that cannot be inspected stays unverified and is not terminated
   assert.equal(terminated, false);
 });
 
+test('an identity that changes before termination is not reported as terminated', () => {
+  let terminateCalls = 0;
+  const result = terminateVerifiedRuntime({
+    pid: process.pid,
+    taskId: 'task-0123456789ab',
+    ownerMarker: randomUUID(),
+  }, {
+    identity: {verified: true, alive: true, reason: 'verified when recovery started'},
+    inspect: pid => ({pid, commandLine: 'node unrelated.mjs'}),
+    terminate: () => { terminateCalls += 1; },
+  });
+
+  assert.equal(result.verified, false);
+  assert.equal(result.terminated, false);
+  assert.equal(terminateCalls, 0);
+  assert.match(result.reason, /does not match/i);
+});
+
 test('a matching task and owner marker is verified before termination', () => {
   const taskId = 'task-0123456789ab';
   const ownerMarker = randomUUID();

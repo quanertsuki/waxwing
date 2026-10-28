@@ -8,7 +8,7 @@ Agent。亲代 Agent 定义任务与验收标准，执行 Agent 实现任务，�
 再独立检查证据，并决定返工、验收或关闭。
 
 CLI、MCP stdio 和 Tauri 桌面端是同一管理器的三个入口。管理器只监听
-`127.0.0.1`。当前 `0.1.1` 是面向可信本机用户和可信委派 Agent 的预览版，
+`127.0.0.1`。当前 `0.2.0` 是面向可信本机用户和可信委派 Agent 的预览版，
 不是多租户或公网服务。
 
 [English](README.md) · [架构](docs/architecture.md) · [贡献](CONTRIBUTING.md) · [安全](SECURITY.md)

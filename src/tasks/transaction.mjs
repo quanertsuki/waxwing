@@ -1,3 +1,4 @@
+import {RuntimeCloseOutcome} from '../runtime/close-outcome.mjs';
 import {TaskLifecycle, transition} from './lifecycle.mjs';
 
 /**
@@ -25,6 +26,7 @@ export class TaskTransaction {
     terminate = null,
     untrusted = () => {},
     runtimeLifecycle = null,
+    closeOutcome = null,
   } = {}) {
     if (!runtime) throw new Error('runtime dependency is required');
     if (!repository) throw new Error('repository dependency is required');
@@ -41,6 +43,8 @@ export class TaskTransaction {
     this.terminate = terminate;
     this.onUntrusted = untrusted;
     this.runtimeLifecycle = runtimeLifecycle;
+    this.closeOutcome = closeOutcome
+      ?? (runtimeLifecycle ? {project: args => runtimeLifecycle.exit(args)} : new RuntimeCloseOutcome({now}));
   }
 
   /**
@@ -115,36 +119,70 @@ export class TaskTransaction {
         await this.forceExit(taskId, rec);
         const gone = await this.runtime.waitForExit(taskId, this.forceExitTimeoutMs);
         if (!gone) {
-          const outcome = this.runtimeLifecycle?.exit({
+          this.runtime.abortClose?.(taskId);
+          const outcome = this.closeOutcome.project({
             task: this.repository.peek(taskId) ?? stopping,
             exitConfirmed: false,
           });
-          throw new Error(outcome?.error
+          throw new Error(outcome.error
             ?? `Task ${taskId}: could not confirm worker exit; data and workspace lock retained`);
         }
       }
 
       const closeError = this.runtime.closeError(taskId);
-      const outcome = this.runtimeLifecycle?.exit({
+      const outcome = this.closeOutcome.project({
         task: this.repository.peek(taskId) ?? stopping,
         exitConfirmed: true,
         closeError,
       });
-      if (outcome?.releaseHandle === false) throw new Error(outcome.error);
+      if (outcome.releaseHandle === false) {
+        this.runtime.abortClose?.(taskId);
+        throw new Error(outcome.error);
+      }
+
+      if (closeError) {
+        // The handle may be forgotten only after the failed terminal record is
+        // durable; otherwise a retry would find `stopping` with no handle.
+        try {
+          this.save(outcome.task);
+        } catch (error) {
+          this.runtime.abortClose?.(taskId);
+          throw error;
+        }
+        this.runtime.forget(taskId);
+        throw new Error(outcome.error);
+      }
+
+      const latest = this.repository.peek(taskId) ?? outcome.task;
+      const transitioned = transition(latest, action);
+      const finalTask = {...transitioned, error: reason ?? transitioned.error};
+      let savedTask = finalTask;
+      try {
+        if (closed && typeof this.acceptance.writeReportAndSave === 'function') {
+          savedTask = this.acceptance.writeReportAndSave(finalTask, {save: this.save}).task ?? finalTask;
+        } else {
+          if (closed && typeof this.acceptance.report === 'function') {
+            const report = this.acceptance.report(finalTask);
+            finalTask.reportHash = report.hash;
+          }
+          savedTask = this.save(finalTask) ?? finalTask;
+        }
+      } catch (error) {
+        this.runtime.abortClose?.(taskId);
+        throw error;
+      }
+      try {
+        this.event(savedTask, {kind: closed ? 'closed' : 'cancelled'});
+      } catch (error) {
+        // The task is already durable; do not strand the owned handle.
+        this.runtime.forget(taskId);
+        throw error;
+      }
       const forgotten = this.runtime.forget(taskId);
       if (!forgotten && this.runtime.has(taskId)) {
-        throw new Error(`Task ${taskId}: worker exit could not be confirmed; data and workspace lock retained`);
+        throw new Error(`Task ${taskId}: worker exit was confirmed but the runtime handle could not be released`);
       }
-      if (closeError) {
-        const failed = outcome?.task ?? {
-          ...stopping,
-          status: 'failed',
-          error: `Task ${taskId} runtime cleanup failed: ${closeError}`,
-          updatedAt: this.now(),
-        };
-        this.save(failed);
-        throw new Error(failed.error);
-      }
+      return {task: savedTask, unchanged: false};
     }
 
     const latest = this.repository.peek(taskId) ?? existing;

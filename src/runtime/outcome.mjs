@@ -118,6 +118,63 @@ export class RuntimeOutcomeSettlement {
     };
   }
 
+  /**
+   * A startup failure is a runtime fact too: the task becomes traceable even
+   * when the process handle stays alive and keeps the workspace lock.
+   */
+  startFailed({task, error = null, message, runtimeUnconfirmed = false} = {}) {
+    if (!validTask(task)) throw new Error('task record is required');
+    if (typeof message !== 'string' || !message) throw new Error('failure message is required');
+    const failed = task.status === 'running'
+      ? this.transition(detached(task), 'fail')
+      : {...detached(task), status: 'failed', updatedAt: this.now()};
+    failed.error = message;
+    return {
+      task: failed,
+      event: {
+        kind: 'start_failed',
+        error: error ?? message,
+        runtimeUnconfirmed: Boolean(runtimeUnconfirmed),
+      },
+    };
+  }
+
+  /** A provider fallback that fails after the first round must leave one failed record. */
+  fallbackFailed({task, providerName = null, message} = {}) {
+    if (!validTask(task)) throw new Error('task record is required');
+    if (typeof message !== 'string' || !message) throw new Error('failure message is required');
+    const failed = task.status === 'running'
+      ? this.transition(detached(task), 'fail')
+      : {...detached(task), status: 'failed', updatedAt: this.now()};
+    failed.error = message;
+    return {
+      task: failed,
+      event: {
+        kind: 'provider_fallback_failed',
+        provider: providerName,
+        error: message,
+      },
+    };
+  }
+
+  /** A stop that cannot confirm exit is a failed stop, not a plain timeout. */
+  stopFailed({task, timeoutMs = null, message} = {}) {
+    if (!validTask(task)) throw new Error('task record is required');
+    if (typeof message !== 'string' || !message) throw new Error('failure message is required');
+    const failed = task.status === 'running'
+      ? this.transition(detached(task), 'fail')
+      : {...detached(task), status: 'failed', updatedAt: this.now()};
+    failed.error = message;
+    return {
+      task: failed,
+      event: {
+        kind: 'round_stop_failed',
+        timeoutMs,
+        error: message,
+      },
+    };
+  }
+
   missingTerminal({task, message} = {}) {
     if (!validTask(task)) throw new Error('task record is required');
     const failed = task.status === 'running' ? this.transition(detached(task), 'fail') : detached(task);

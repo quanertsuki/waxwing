@@ -23,6 +23,7 @@ interface.
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
 | `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff |
+| `src/runtime/close-outcome.mjs` | Confirmed-exit close projection, cleanup failure, and handle-release decision |
 | `src/runtime/lifecycle.mjs` | Restart recovery projection: verified termination, manual retention, confirmed exit |
 | `src/runtime/outcome.mjs` | Runtime terminal outcome, first-round fallback, protocol failure, and ACK timeout projection |
 | `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
@@ -30,11 +31,14 @@ interface.
 | `src/tasks/command.mjs` | Create/rework/preflight validation order and transaction inputs |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
 | `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification |
-| `src/research/service.mjs` | Parallel read-only research shards, scratch workspaces, partial results, aggregate reports |
+| `src/research/repository.mjs` | Batch storage, atomic `batch.json`, and crash-window orphan reconciliation |
+| `src/research/capture.mjs` | Terminal result/error capture isolated per shard |
+| `src/research/report.mjs` | Aggregate report projection, atomic write, hash, and paging |
+| `src/research/service.mjs` | Compatibility facade: parallel shards, scratch workspaces, serialized refresh, partial results |
 | `src/usage/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
 | `src/usage/module.mjs` | One usage seam: indexing, pricing, limits, override, and rework policy |
-| `src/usage/service.mjs` | Compatibility facade; production callers use `UsageModule` |
+| `src/usage/service.mjs` | Deprecated compatibility adapter; production callers use `UsageModule` |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
 | `prototype/` | Legacy entry-point and data compatibility until at least `0.2.0` |

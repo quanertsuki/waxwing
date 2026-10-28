@@ -24,13 +24,19 @@ function lifecycle(terminate = () => {}) {
 
 test('a verified residual runtime is terminated and retains the workspace', () => {
   let terminated = null;
-  const result = lifecycle(record => { terminated = record; }).recover({
+  let receivedIdentity = null;
+  const result = lifecycle((record, options) => {
+    terminated = record;
+    receivedIdentity = options?.identity ?? null;
+    return {terminated: true};
+  }).recover({
     task: task(),
     runtime: runtime(),
     identity: {verified: true, alive: true, reason: 'identity matches'},
   });
 
   assert.equal(terminated.pid, 4901);
+  assert.equal(receivedIdentity.verified, true);
   assert.equal(result.decision, 'terminated');
   assert.equal(result.runtime.phase, 'recovered-terminated');
   assert.equal(result.runtime.manualActionRequired, false);
@@ -72,6 +78,25 @@ test('a disappeared process becomes a recoverable failed record', () => {
   assert.equal(result.runtime.manualActionRequired, false);
   assert.equal(result.task.workspaceLease.status, 'retained');
   assert.equal(result.task.rounds[0].result.text, 'keep');
+});
+
+test('a termination without a confirmed verdict retains the lock', () => {
+  const result = lifecycle(() => ({
+    verified: false,
+    alive: true,
+    terminated: false,
+    reason: 'PID was reused before termination',
+  })).recover({
+    task: task(),
+    runtime: runtime(),
+    identity: {verified: true, alive: true, reason: 'identity matches'},
+  });
+
+  assert.equal(result.decision, 'termination-failed');
+  assert.equal(result.runtime.phase, 'recovery-failed');
+  assert.equal(result.runtime.manualActionRequired, true);
+  assert.equal(result.task.workspaceLease.status, 'locked-unverified');
+  assert.match(result.runtime.recovery.reason, /PID was reused before termination/);
 });
 
 test('a failed termination retains the lock and records the failure', () => {

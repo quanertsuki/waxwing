@@ -61,17 +61,47 @@ export class TaskRepository {
     return this.records.delete(id);
   }
 
+  /**
+   * Load every stored task, validate its identity, and apply the legacy
+   * migrations that startup owes old records. Validation happens before a
+   * record enters the index, so a mismatched or corrupt file can never
+   * overwrite another task.
+   */
   restore() {
     if (!fs.existsSync(this.runsDir)) return [];
     const restored = [];
     for (const name of fs.readdirSync(this.runsDir)) {
       if (!TASK_ID.test(name)) continue;
-      const file = path.join(this.directory(name), 'task.json');
+      const directory = this.directory(name);
+      const file = path.join(directory, 'task.json');
       const task = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (task.id !== name) throw new Error(`Task ID mismatch in ${file}`);
+      task.schemaVersion = 2;
+      if (!task.workspaceLease) {
+        task.workspaceLease = {
+          mode: 'legacy',
+          status: 'retained',
+          sourceWorkspace: task.workspace,
+          executionWorkspace: task.workspace,
+        };
+        task.sourceWorkspace = task.workspace;
+      }
+      if (!Number.isSafeInteger(task.eventSequence)) {
+        task.eventSequence = lastEventSequence(path.join(directory, 'events.jsonl'));
+      }
       this.records.set(name, task);
       restored.push(task);
     }
     return restored;
+  }
+}
+
+function lastEventSequence(file) {
+  try {
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+    const last = lines.length ? JSON.parse(lines.at(-1)) : null;
+    return Number.isSafeInteger(last?.sequence) ? last.sequence : lines.length;
+  } catch {
+    return 0;
   }
 }
