@@ -194,6 +194,11 @@ try {
   if (initialized?.result?.serverInfo?.name !== 'waxwing') {
     throw new Error(`MCP initialization failed: ${JSON.stringify(mcp.responses)}`);
   }
+  if (initialized.result.serverInfo.version !== result[0].version) {
+    throw new Error(
+      `MCP reports version ${initialized.result.serverInfo.version}, package is ${result[0].version}`,
+    );
+  }
   const listed = mcp.responses.find(response => response.id === 2);
   if (listed?.result?.isError || !Array.isArray(JSON.parse(listed.result.content[0].text))) {
     throw new Error(`MCP waxwing_list failed: ${JSON.stringify(listed)}`);
