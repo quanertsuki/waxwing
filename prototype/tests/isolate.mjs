@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {loadConfiguration} from '../config.mjs';
+import {pruneScratchRoots, scratchRoot} from './scratch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROTOTYPE = path.resolve(HERE, '..');
@@ -27,11 +28,14 @@ function samePath(a, b) {
 
 const configured = process.env.DSH_SUBAGENT_ROOT ?? process.env.DSH_PROTOTYPE_ROOT;
 const auto = configured === undefined || configured.trim() === '';
-const root = path.resolve(auto ? path.join(HERE, '.tmp', `data-${process.pid}`) : configured);
+const root = path.resolve(auto ? scratchRoot(HERE) : configured);
 if (samePath(root, REAL_ROOT)) {
   throw new Error(`test isolation refused: data root points at the live data directory (${root}); tests must use an isolated directory`);
 }
-if (auto) fs.rmSync(root, {recursive: true, force: true});
+if (auto) {
+  pruneScratchRoots(HERE, root);
+  fs.rmSync(root, {recursive: true, force: true});
+}
 fs.mkdirSync(root, {recursive: true});
 // WAXWING_HOME wins over DSH_SUBAGENT_ROOT during config resolution, so it is
 // pinned as well: an inherited WAXWING_HOME from a live runtime must never move
