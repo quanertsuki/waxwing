@@ -9,7 +9,7 @@ worker Agent implements it, and the delegating party independently inspects the
 evidence before accepting the result.
 
 CLI, MCP stdio, and the Tauri desktop app are three adapters over one manager
-listening only on `127.0.0.1`. The current release is a `0.1.0` preview intended
+listening only on `127.0.0.1`. The current release is a `0.1.1` preview intended
 for a trusted local user and a trusted delegating Agent, not a public or
 multi-tenant service.
 
