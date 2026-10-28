@@ -200,7 +200,7 @@ Research Service 与 Research State 各自维护 active、terminal、cancellatio
 
 ## 完成审计
 
-状态：实现与门禁已完成；提交并推送后补充远程 SHA。
+状态：已完成并推送到 `waxwing/release/deepening-round3`。
 
 ### 实施证据
 
@@ -224,7 +224,7 @@ Research Service 与 Research State 各自维护 active、terminal、cancellatio
 
 - 分支：`release/deepening-round3`。
 - 实现起点：`b5750ea8e58f64d94e7b408f7d9cee3ab27dc2ea`。
-- 远程 SHA：推送后填写。
+- 远程 SHA：`fc6dbf8cfe5617690918ed7c1a17b6af3668ce22`。
 - 旧远程 `origin`（`quanertsuki/DS_subagent`）未修改、未推送。
 - `waxwing/main` 未被直接写入。
 - 未创建 tag 或 GitHub Release，未发布 npm。
