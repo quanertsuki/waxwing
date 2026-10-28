@@ -36,17 +36,13 @@ CLI、MCP stdio 和 Tauri 桌面端是同一管理器的三个入口。管理器
 
 需要 Node.js 20 或更高版本。
 
-`0.1.0` 尚未发布到 npm registry。发布前请从
-[v0.1.0 Release](https://github.com/quanertsuki/waxwing/releases/tag/v0.1.0)
-下载 `waxwing-0.1.0.tgz`，再安装该文件：
+`waxwing` 已发布到 npm registry，包名为 `@quanernya/waxwing`：
 
 ```bash
-npm install -g ./waxwing-0.1.0.tgz
+npm install -g @quanernya/waxwing
 waxwing health
 waxwing
 ```
-
-npm registry 发布完成后，推荐安装命令为 `npm install -g @quanernya/waxwing`。
 
 安装包提供两个命令：
 

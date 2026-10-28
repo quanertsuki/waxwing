@@ -27,13 +27,14 @@ interface.
 | `src/runtime/outcome.mjs` | Runtime terminal outcome, first-round fallback, protocol failure, and ACK timeout projection |
 | `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
+| `src/tasks/command.mjs` | Create/rework/preflight validation order and transaction inputs |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
 | `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification |
 | `src/research/service.mjs` | Parallel read-only research shards, scratch workspaces, partial results, aggregate reports |
 | `src/usage/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
-| `src/usage/module.mjs` | One seam for metrics snapshots, cumulative limits, one-round override, and rework policy |
-| `src/usage/service.mjs` | Compatibility metrics facade; optional thresholds are disabled by default |
+| `src/usage/module.mjs` | One usage seam: indexing, pricing, limits, override, and rework policy |
+| `src/usage/service.mjs` | Compatibility facade; production callers use `UsageModule` |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
 | `prototype/` | Legacy entry-point and data compatibility until at least `0.2.0` |
@@ -60,13 +61,16 @@ flowchart LR
   Gateway["Loopback HTTP gateway<br/>127.0.0.1 + bearer token"]
 
   subgraph Manager["Local manager: single state owner"]
+    TaskCmd["TaskCommand<br/>create/rework/preflight"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
+    Outcome["RuntimeOutcome<br/>terminal/fallback/ack-timeout"]
     Runtime["Runtime<br/>round IDs + heartbeat + recovery"]
     Supervisor["RuntimeSupervisor<br/>release + exit gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
     Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
-    Research["ResearchBatchService<br/>parallel scratch shards + report"]
-    Usage["UsageService<br/>metrics; limits opt-in"]
+    Research["ResearchBatchService + ResearchState<br/>parallel scratch shards + report"]
+    Usage["UsageModule<br/>indexing, limits, override, rework"]
+    TaskView["TaskView<br/>bounded read contract"]
     Providers["ProviderRegistry<br/>DSH SDK + OpenAI-compatible"]
   end
 
@@ -89,18 +93,25 @@ flowchart LR
   MCP --> Gateway
   Desktop --> Gateway
 
+  Gateway --> TaskCmd
+  Gateway --> TaskView
   Gateway --> Tasks
   Gateway --> Acceptance
   Gateway --> Research
   Gateway --> Usage
+  TaskCmd --> Tasks
+  Tasks <--> Outcome
   Tasks <--> Runtime
   Runtime --> Supervisor
   Tasks <--> Lease
   Tasks <--> Data
   Acceptance --> Data
   Research --> Tasks
+  Research --> Usage
   Research --> Scratch
   Research --> Data
+  Usage --> Data
+  Usage --> Tasks
   Runtime --> Data
 
   Runtime --> Protocol

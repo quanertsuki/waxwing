@@ -39,19 +39,14 @@ multi-tenant service.
 
 Requires Node.js 20 or newer.
 
-The npm registry publication for `0.1.0` is pending. Until it is available,
-download `waxwing-0.1.0.tgz` from the
-[v0.1.0 release](https://github.com/quanertsuki/waxwing/releases/tag/v0.1.0)
-and install that file:
+`waxwing` is installed from the npm registry under the package name
+`@quanernya/waxwing`:
 
 ```bash
-npm install -g ./waxwing-0.1.0.tgz
+npm install -g @quanernya/waxwing
 waxwing health
 waxwing
 ```
-
-`npm install -g @quanernya/waxwing` becomes the supported install command after the
-package is published to the npm registry.
 
 The package installs two commands:
 

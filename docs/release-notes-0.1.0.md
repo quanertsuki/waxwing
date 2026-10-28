@@ -19,14 +19,18 @@ statistics on the local machine.
 - Waxwing data lives under the per-user Waxwing directory, with copy-only
   migration from the legacy location.
 
-## Downloads
+## Install
 
-- `waxwing-0.1.0.tgz`: npm package artifact for the `waxwing` CLI and MCP server.
-- `waxwing-0.1.0-windows-x64.zip`: unsigned portable Windows desktop build.
-- `SHA256SUMS`: checksums for the release artifacts.
+Install the npm package from the registry:
 
-The npm registry publication is pending. Install the tarball above until
-`npm install -g @quanernya/waxwing` becomes available.
+```bash
+npm install -g @quanernya/waxwing
+```
+
+The package installs `waxwing` for the CLI and `waxwing-mcp` for the MCP stdio
+server. The tarball `waxwing-0.1.0.tgz`, the unsigned Windows portable archive
+`waxwing-0.1.0-windows-x64.zip`, and `SHA256SUMS` remain available as release
+artifacts for the `v0.1.0` GitHub Release.
 
 Verify downloaded files before running them:
 
