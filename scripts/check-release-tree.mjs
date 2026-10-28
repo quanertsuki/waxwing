@@ -16,6 +16,7 @@ export function walk(directory, prefix = '') {
 function discoverReleaseTree(cwd = process.cwd()) {
   let root;
   let files;
+  let sourceCheckout = false;
   try {
     root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd,
@@ -29,11 +30,12 @@ function discoverReleaseTree(cwd = process.cwd()) {
       .split('\0')
       .filter(Boolean)
       .map(file => file.replaceAll('\\', '/'));
+    sourceCheckout = true;
   } catch {
     root = cwd;
     files = walk(root);
   }
-  return {root, files};
+  return {root, files, sourceCheckout};
 }
 
 export const required = [
@@ -64,6 +66,11 @@ export const required = [
   'src/usage/service.mjs',
   'src/workspace/lease-manager.mjs',
 ];
+
+// The npm package ships the CLI and MCP tree without the desktop sources, so an
+// installed package is checked against the subset it publishes while a Git
+// checkout keeps the full release list.
+export const packagedRequired = required.filter(file => !file.startsWith('desktop/'));
 
 const forbiddenRoots =
   /^(?:dispatch|handoffs|acceptance|research|data|logs|runtime|node_modules|dist|target|\.codegraph|\.local-archive)(?:\/|$)/i;
@@ -111,11 +118,13 @@ export function findMachineSpecificPath(content) {
     || /(?:^|[\s"'`(])\/(?:home|Users)\/[^/\s"'`<>]+(?:\/|$)/m.test(normalized);
 }
 
-export function checkReleaseTree({root, releaseFiles} = {}) {
-  const tree = root && releaseFiles ? {root, files: releaseFiles} : discoverReleaseTree();
+export function checkReleaseTree({root, releaseFiles, packaged = false} = {}) {
+  const tree = root && releaseFiles
+    ? {root, files: releaseFiles, sourceCheckout: !packaged}
+    : discoverReleaseTree();
   const presentFiles = tree.files.filter(file => existsSync(path.join(tree.root, file)));
   const errors = [];
-  for (const file of required) {
+  for (const file of tree.sourceCheckout ? required : packagedRequired) {
     if (!presentFiles.includes(file)) errors.push(`missing required release file: ${file}`);
   }
   for (const file of presentFiles) {
