@@ -22,8 +22,8 @@
   ],
   "type": "module",
   "bin": {
-    "waxwing": "./bin/waxwing.mjs",
-    "waxwing-mcp": "./bin/waxwing-mcp.mjs"
+    "waxwing": "bin/waxwing.mjs",
+    "waxwing-mcp": "bin/waxwing-mcp.mjs"
   },
   "exports": {
     ".": "./src/app.mjs",

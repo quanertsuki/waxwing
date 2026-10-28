@@ -59,3 +59,17 @@ test('the release check scans files for machine-specific paths', () => {
   assert.equal(findMachineSpecificPath(`workspace: ${portable}`), false);
   assert.equal(findMachineSpecificPath(`workspace: ${portableOtherDrive}`), false);
 });
+
+test('npm command entries point at packaged files without path prefixes', () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.resolve(HERE, '../../package.json'), 'utf8'),
+  );
+  assert.deepEqual(packageJson.bin, {
+    waxwing: 'bin/waxwing.mjs',
+    'waxwing-mcp': 'bin/waxwing-mcp.mjs',
+  });
+  for (const entry of Object.values(packageJson.bin)) {
+    assert.ok(!entry.startsWith('./'), `${entry} must not start with ./`);
+    assert.ok(fs.statSync(path.resolve(HERE, '../..', entry)).isFile(), `${entry} must exist`);
+  }
+});
