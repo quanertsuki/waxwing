@@ -187,7 +187,7 @@ try {
   }
 
   const mcp = await runMcp(
-    path.join(moduleRoot, 'waxwing', 'bin', 'waxwing-mcp.mjs'),
+    path.join(moduleRoot, '@quanernya', 'waxwing', 'bin', 'waxwing-mcp.mjs'),
     env,
   );
   const initialized = mcp.responses.find(response => response.id === 1);

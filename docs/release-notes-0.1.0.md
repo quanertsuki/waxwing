@@ -26,7 +26,7 @@ statistics on the local machine.
 - `SHA256SUMS`: checksums for the release artifacts.
 
 The npm registry publication is pending. Install the tarball above until
-`npm install -g waxwing` becomes available.
+`npm install -g @quanernya/waxwing` becomes available.
 
 Verify downloaded files before running them:
 

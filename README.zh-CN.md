@@ -46,7 +46,7 @@ waxwing health
 waxwing
 ```
 
-npm registry 发布完成后，推荐安装命令为 `npm install -g waxwing`。
+npm registry 发布完成后，推荐安装命令为 `npm install -g @quanernya/waxwing`。
 
 安装包提供两个命令：
 

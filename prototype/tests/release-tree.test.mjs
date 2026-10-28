@@ -64,6 +64,7 @@ test('npm command entries point at packaged files without path prefixes', () => 
   const packageJson = JSON.parse(
     fs.readFileSync(path.resolve(HERE, '../../package.json'), 'utf8'),
   );
+  assert.equal(packageJson.name, '@quanernya/waxwing');
   assert.deepEqual(packageJson.bin, {
     waxwing: 'bin/waxwing.mjs',
     'waxwing-mcp': 'bin/waxwing-mcp.mjs',

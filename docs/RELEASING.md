@@ -75,13 +75,13 @@ default for a new repository is no registry publication. A first manual publish
 can be performed instead:
 
 ```bash
-npm publish waxwing-0.1.0.tgz --access public
+npm publish @quanernya/waxwing@0.1.0 --access public
 ```
 
 Verify in a clean temporary prefix:
 
 ```bash
-npm install --global --prefix ./waxwing-prefix ./waxwing-0.1.0.tgz
+npm install --global --prefix ./waxwing-prefix @quanernya/waxwing@0.1.0
 ./waxwing-prefix/bin/waxwing health
 ./waxwing-prefix/bin/waxwing-mcp
 ```
