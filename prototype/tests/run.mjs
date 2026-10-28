@@ -6,9 +6,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {pruneScratchRoots, scratchRoot} from './scratch.mjs';
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
-const dataRoot=path.join(HERE,'.tmp',`data-${process.pid}`);
+const dataRoot=scratchRoot(HERE);
+pruneScratchRoots(HERE,dataRoot);
 fs.rmSync(dataRoot,{recursive:true,force:true});
 // Isolate the manager under test: never touch the live prototype-data root.
 // WAXWING_HOME outranks DSH_SUBAGENT_ROOT in config resolution, so pin it too:
