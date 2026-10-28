@@ -216,3 +216,35 @@ usage snapshot 的 unavailable 降级仍在 manager 和 `prototype/usage.mjs` �
 只有全部门禁通过、差异只含本计划范围、发布树不含生成物或秘密时才推送。推送目标为 `waxwing` 的 `release/deepening-round2`，并记录提交哈希与远程分支。
 
 不创建 tag 或 GitHub Release；不发布 npm。若 GitHub 权限或分支保护阻止创建/合并 PR，保留已推送分支并报告，不绕过保护。
+
+## 完成审计
+
+状态：已完成并推送到 `waxwing/release/deepening-round2`。
+
+### 实施证据
+
+- 起点：`5776aff347404b2507a79c10ba9f39c9650d17fb`。
+- 阶段 1：`bd93e7f`（`Deepen runtime recovery and close lifecycle`）。
+- 阶段 2：`6a471b2`（`Deepen acceptance and deletion authorization`）。
+- 阶段 3：`c614413`（`Deepen task dispatch transactions`）。
+- 阶段 4：`85a38c5`（`Deepen workspace conflict projection`）。
+- 阶段 5：`481d5d0`（`Deepen task read view contract`）。
+- 阶段 6：`b5750ea8e58f64d94e7b408f7d9cee3ab27dc2ea`（`Deepen usage and execution policy`）。
+- 计划提交：`33f3b9f`（`Add second deepening execution plan`）。
+
+### 测试证据
+
+- JavaScript：`205/205` 通过。
+- Rust：`4/4` 通过；`cargo fmt` 与 `cargo check` 通过。
+- Vue 生产构建：通过。
+- 打包冒烟与桌面资源准备：通过。
+- 发布树检查：`228` 个文件通过。
+- 敏感文件扫描与 `git diff --check`：通过。
+
+### 推送证据
+
+- 分支：`waxwing/release/deepening-round2`。
+- HEAD：`b5750ea8e58f64d94e7b408f7d9cee3ab27dc2ea`。
+- 旧远程 `origin`（`quanertsuki/DS_subagent`）未修改、未推送。
+- `waxwing/main` 未被直接写入。
+- 未创建 tag 或 GitHub Release，未发布 npm。
