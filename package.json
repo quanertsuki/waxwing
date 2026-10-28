@@ -1,5 +1,5 @@
 {
-  "name": "waxwing",
+  "name": "@quanernya/waxwing",
   "version": "0.1.0",
   "description": "Local-first delegation manager for DeepSeek and OpenAI-compatible coding agents.",
   "author": "quanertsuki",

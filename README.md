@@ -50,7 +50,7 @@ waxwing health
 waxwing
 ```
 
-`npm install -g waxwing` becomes the supported install command after the
+`npm install -g @quanernya/waxwing` becomes the supported install command after the
 package is published to the npm registry.
 
 The package installs two commands:
