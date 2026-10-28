@@ -83,6 +83,30 @@ test('create rolls back the index, directory, and workspace lease after a failed
   }
 });
 
+test('a failed atomic write never publishes a task into the repository index', () => {
+  const root = temporaryRoot();
+  try {
+    let fail = true;
+    const repository = repositoryAt(root, (file, value) => {
+      if (fail) throw new Error('disk unavailable');
+      fs.mkdirSync(path.dirname(file), {recursive: true});
+      fs.writeFileSync(file, JSON.stringify(value));
+    });
+    const task = {id: 'task-0123456789ab', status: 'created', rounds: []};
+    assert.throws(() => repository.save(task), /disk unavailable/);
+    assert.equal(repository.has(task.id), false);
+    assert.throws(() => repository.get(task.id), /Unknown task/);
+    assert.deepEqual(repository.ids(), []);
+
+    fail = false;
+    repository.save(task);
+    assert.equal(repository.get(task.id), task);
+    assert.deepEqual(repository.ids(), [task.id]);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
 test('stop without a runtime handle closes directly and records the final event', async () => {
   const root = temporaryRoot();
   try {

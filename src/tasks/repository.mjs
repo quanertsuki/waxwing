@@ -52,8 +52,8 @@ export class TaskRepository {
   }
 
   save(task) {
-    this.records.set(task.id, task);
     this.atomicJson(path.join(this.directory(task.id), 'task.json'), task);
+    this.records.set(task.id, task);
     return task;
   }
 
