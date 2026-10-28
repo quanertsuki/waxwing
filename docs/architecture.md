@@ -17,12 +17,14 @@ interface.
 | `src/tasks/repository.mjs` | Task index, record validation, atomic `task.json` persistence |
 | `src/tasks/lifecycle.mjs` | Legal task-status transitions |
 | `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation |
+| `src/tasks/command.mjs` | Create/rework command validation order and transaction inputs |
 | `src/tasks/view.mjs` | Stable bounded list/summary/detail/page contract shared by CLI, MCP, Rust, and Vue |
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
 | `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff |
 | `src/runtime/lifecycle.mjs` | Restart recovery projection: verified termination, manual retention, confirmed exit |
+| `src/runtime/outcome.mjs` | Runtime terminal outcome, first-round fallback, protocol failure, and ACK timeout projection |
 | `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
@@ -30,7 +32,8 @@ interface.
 | `src/research/service.mjs` | Parallel read-only research shards, scratch workspaces, partial results, aggregate reports |
 | `src/usage/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
-| `src/usage/service.mjs` | Metrics facade; unavailable snapshots use the same projection as the manager; optional thresholds are disabled by default |
+| `src/usage/module.mjs` | One seam for metrics snapshots, cumulative limits, one-round override, and rework policy |
+| `src/usage/service.mjs` | Compatibility metrics facade; optional thresholds are disabled by default |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
 | `prototype/` | Legacy entry-point and data compatibility until at least `0.2.0` |

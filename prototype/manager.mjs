@@ -11,20 +11,13 @@ import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnviron
 import {transition} from '../src/tasks/lifecycle.mjs';
 import {budgetFileFor, parseOptionalMaxTokens, resolveRoundBudget} from './budget.mjs';
 import {DEFAULT_EFFORT, parseOptionalEffort, resolveRoundEffort} from './effort.mjs';
-import {usageForTask,usageForList,usageForView} from '../src/usage/service.mjs';
-import {
-  blockReason as usageLimitBlockReason,
-  decideRework,
-  effectiveLimits,
-  mergeLimits,
-  overrideEvent,
-  parseOverride,
-  unavailableUsageSnapshot,
-} from '../src/usage/policy.mjs';
+import {effectiveLimits} from '../src/usage/policy.mjs';
+import {UsageModule} from '../src/usage/module.mjs';
 import {ExecutionPolicy} from '../src/usage/execution-policy.mjs';
 import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {RuntimeLifecycle} from '../src/runtime/lifecycle.mjs';
+import {RuntimeOutcomeSettlement} from '../src/runtime/outcome.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
 import {TaskRepository} from '../src/tasks/repository.mjs';
 import {TaskTransaction} from '../src/tasks/transaction.mjs';
@@ -38,6 +31,7 @@ import {
 import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
 import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
+import {TaskCommandModule} from '../src/tasks/command.mjs';
 
 const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/');
 
@@ -59,13 +53,6 @@ const isLowSurrogate = c => c >= 0xdc00 && c <= 0xdfff;
 function shortMessage(error) {
   const text = error?.message ?? String(error);
   return text.length > 240 ? `${text.slice(0, 239)}…` : text;
-}
-/** Resolve optional per-call limits over a complete base set. */
-function resolveLimitOverride(value, base) {
-  return mergeLimits(value, base);
-}
-function effectiveUsageLimits(t) {
-  return effectiveLimits(t?.usageLimits, config.usageLimits);
 }
 /** Collapse whitespace so a bounded summary cannot grow through JSON escapes. */
 function oneLine(value) {
@@ -187,6 +174,11 @@ export function createManager(options = {}) {
   });
   let shuttingDown = false;
 
+  const usageModule = new UsageModule({
+    configuration: config.usageLimits,
+    limitsForTask: task => effectiveLimits(task?.usageLimits, config.usageLimits),
+  });
+
   const directory = id => repository.directory(id);
   const get = id => repository.get(id);
   const save = task => {
@@ -259,26 +251,26 @@ export function createManager(options = {}) {
   function reworkBlockedReason(t, usage = null) {
     const base = baseReworkBlockedReason(t);
     if (base) return base;
-    if (usage?.limitState === 'blocked') return usageLimitBlockReason(usage);
+    if (usage?.limitState === 'blocked') return usageModule.blockedReason(usage);
     return null;
   }
   /** Never throws; an unavailable usage source becomes an unavailable limit state. */
   function usageSnapshot(t, options = {}) {
-    try {
-      return usageForTask(t, directory(t.id), options);
-    } catch (error) {
-      const reason = shortMessage(error);
-      let limits = config.usageLimits;
-      try { limits = effectiveUsageLimits(t); } catch {}
-      return unavailableUsageSnapshot({task: t, reason, limits});
-    }
+    return usageModule.snapshot(t, directory(t.id), options);
   }
-  function validatePrompt(value) {
-    if (typeof value !== 'string' || !value.trim() || value.length > 100000) {
-      throw new Error('Nonempty prompt required (max 100000 characters)');
-    }
-    return value;
-  }
+  const commandModule = new TaskCommandModule({
+    limitsForRequest: (task, value) => usageModule.limitsForRequest(task, value),
+    parseBudget: parseOptionalMaxTokens,
+    parseEffort: parseOptionalEffort,
+    providerSupportsEffort: supportsEffort,
+    resolveBudget: resolveRoundBudget,
+    resolveEffort: resolveRoundEffort,
+    defaultEffort: () => config.defaultEffort ?? DEFAULT_EFFORT,
+    baseBlocked: task => baseReworkBlockedReason(task),
+    canStart: () => shuttingDown ? 'Manager is shutting down' : null,
+    preflight: ({request, taskId, validated}) => preflightCreate(request, taskId, validated),
+    now: () => new Date().toISOString(),
+  });
   /** Resolve and validate a workspace before any task directory is created. */
   function resolveWorkspace(value) {
     if (typeof value !== 'string' || !value.trim()) throw new Error('Workspace path required');
@@ -304,16 +296,11 @@ export function createManager(options = {}) {
     }
     return real;
   }
-  /** Every create precondition is checked here, before any directory or record. */
-  function preflightCreate(a, taskId) {
-    if (shuttingDown) throw new Error('Manager is shutting down');
-    const prompt = validatePrompt(a.prompt);
-    // Validate limits before workspace resolution, task creation, or any write.
-    const usageLimits = a.usageLimits === undefined
-      ? effectiveLimits(undefined, config.usageLimits)
-      : resolveLimitOverride(a.usageLimits, effectiveLimits(undefined, config.usageLimits));
-    const requested = parseOptionalMaxTokens(a.maxTokens);
-    const requestedEffort = parseOptionalEffort(a.effort);
+  /** Resolve workspace/provider/budget after TaskCommandModule validates the request. */
+  function preflightCreate(a, taskId, validated = commandModule.validateCreate(a)) {
+    const usageLimits = validated.usageLimits;
+    const requested = validated.maxTokens;
+    const requestedEffort = validated.effort;
     // Resolve provider: explicit name > defaultProvider > configured fallback.
     const providerName = a.provider || config.defaultProvider;
     let provider = null;
@@ -344,7 +331,7 @@ export function createManager(options = {}) {
       taskId,
     });
     return {
-      prompt,
+      prompt: validated.prompt,
       workspace,
       workspacePlan,
       maxTokens: resolveRoundBudget({requested, fallback: config.maxTokens}),
@@ -392,10 +379,7 @@ export function createManager(options = {}) {
     const error = clip(oneLine(t.error ?? ''), ERROR_LIMIT);
     const last = t.rounds.at(-1);
     let usage = precomputedUsage;
-    if (!usage) {
-      try { usage = usageForList(t, directory(t.id)); }
-      catch (e) { usage = {available: false, error: oneLine(e.message).slice(0, 240)}; }
-    }
+    if (!usage) usage = usageModule.list(t, directory(t.id));
     const item = taskListView(t, {
       summary: withPaths ? null : summary,
       usage,
@@ -500,15 +484,7 @@ export function createManager(options = {}) {
   }
   /** Usage metrics and per-request detail as reconstructable JSON text. */
   function usagePage(t, offset, limit) {
-    let payload;
-    try { payload = usageForView(t, directory(t.id)); }
-    catch (e) {
-      const reason = oneLine(e.message).slice(0, 240);
-      payload = {id: t.id, model: t.model ?? null, pricing: null,
-        totals: {available: false, error: reason}, rounds: [], requests: [],
-        missingUsage: [], warnings: [reason],
-        scan: {eventsBytes: 0, indexedBytes: 0, bytesRead: 0, pendingBytes: 0, rebuilt: false, parseErrors: 0}};
-    }
+    const payload = usageModule.view(t, directory(t.id));
     const text = JSON.stringify(payload, null, 2);
     return {id: t.id, view: 'usage', ...pageOf(text, offset, limit)};
   }
@@ -723,6 +699,12 @@ export function createManager(options = {}) {
   const runtimeLifecycle = new RuntimeLifecycle({
     terminate: record => terminateVerifiedRuntime(record),
   });
+  const outcomeSettlement = new RuntimeOutcomeSettlement({
+    transition: (task, action) => transition(task, action),
+    fallbackProvider: name => providerByName(name),
+    defaultModel: () => config.model,
+    supportsEffort: provider => supportsEffort(provider),
+  });
   /**
    * Liveness facade. A live handle keeps the workspace locked, so every caller
    * that used to read the raw handles map still reads the same truth here.
@@ -760,59 +742,34 @@ export function createManager(options = {}) {
   });
   /** Persist a terminal result or error, applying first-round Provider fallback. */
   function settleTerminal(task, rec, message) {
-    const ok = message.kind === 'result' && message.finishReason === 'completed';
-    // Task-level fallback: if the first round fails and a fallback provider
-    // exists, switch and retry. The retry itself is dispatched only from the
-    // released handoff below, never from this terminal message.
-    if (!ok && task.rounds.length === 1 && task.provider?.name !== config.fallbackProvider) {
-      const fallbackName = config.fallbackProvider;
-      if (fallbackName) {
-        try {
-          const fallbackProvider = providerByName(fallbackName);
-          event(task, {kind: 'provider_fallback', from: task.provider?.name, to: fallbackName, error: message.error || message.finishReason});
-          const round1 = task.rounds[0];
-          round1.result = {text: message.text ?? '', finishReason: message.finishReason, error: message.error || `Provider ended with ${message.finishReason}`};
-          round1.finishedAt = new Date().toISOString();
-          task.provider = fallbackProvider;
-          task.model = fallbackProvider.model || config.model;
-          const failed = transition(task, 'fail');
-          failed.error = null;
-          save(failed);
-          runtime.deferFallback(failed.id, {
-            taskId: failed.id,
-            prompt: round1.prompt,
-            maxTokens: round1.maxTokens,
-            effort: supportsEffort(fallbackProvider) ? round1.effort ?? null : null,
-            providerName: fallbackName,
-          });
-          return;
-        } catch (fallbackError) {
-          // Fallback provider not found; proceed with the normal failure.
-          event(task, {kind: 'provider_fallback_failed', error: fallbackError.message});
-        }
-      }
+    let fallback = null;
+    try {
+      fallback = outcomeSettlement.firstRoundFailure(task, message, config.fallbackProvider);
+    } catch (error) {
+      event(task, {kind: 'provider_fallback_failed', error: error.message});
     }
-    const changed = transition(task, ok ? 'finish' : 'fail');
-    changed.output = message.text ?? ''; changed.finishReason = message.finishReason;
-    changed.error = ok ? null : (message.error ?? `Provider ended with ${message.finishReason}`);
-    changed.rounds.at(-1).result = {text: changed.output, finishReason: changed.finishReason, error: changed.error};
-    changed.rounds.at(-1).finishedAt = new Date().toISOString();
-    event(changed, {kind: 'round_finished', roundId: message.roundId, status: changed.status}); save(changed);
+    if (fallback) {
+      event(fallback.task, fallback.event);
+      save(fallback.task);
+      runtime.deferFallback(fallback.fallback.taskId, fallback.fallback);
+      return;
+    }
+    const outcome = outcomeSettlement.terminal({task, message});
+    event(outcome.task, outcome.event);
+    save(outcome.task);
   }
   /** A release without a result or error is a protocol violation, not a success. */
   function settleMissingTerminal(task, rec, message) {
-    const failed = task.status === 'running' ? transition(task, 'fail') : task;
-    failed.error = `Task ${task.id}: worker released ${message.roundId} without a result or error`;
-    event(failed, {kind: 'round_protocol_error', roundId: message.roundId, reason: 'missing terminal message'});
-    save(failed);
+    const outcome = outcomeSettlement.missingTerminal({task, message});
+    event(outcome.task, outcome.event);
+    save(outcome.task);
   }
   /** A busy worker means its previous round never released; fail explicitly. */
   function settleWorkerBusy(task, rec, message) {
-    const failed = task.status === 'running' ? transition(task, 'fail') : task;
-    failed.error = `Task ${task.id}: worker_busy for ${message.roundId}; the previous round is still active`;
-    event(failed, {kind: 'worker_busy', reportedRoundId: message.roundId});
-    runtime.reportHealth(failed, rec, 'unhealthy', 'worker_busy');
-    save(failed);
+    const outcome = outcomeSettlement.workerBusy({task, message});
+    event(outcome.task, outcome.event);
+    runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
+    save(outcome.task);
   }
   /** Deferred Provider fallback starts only after the failed round released. */
   function handoffReleased(fallback) {
@@ -830,11 +787,10 @@ export function createManager(options = {}) {
   }
   /** An unacknowledged round is untrusted, but its process is deliberately kept. */
   function settleAckTimeout(task, rec, roundId, timeoutMs) {
-    const failed = transition(task, 'fail');
-    failed.error = `Task ${task.id}: worker did not acknowledge round ${roundId} within ${timeoutMs / 1000}s; the process was not terminated`;
-    runtime.reportHealth(failed, rec, 'unhealthy', 'ack timeout');
-    event(failed, {kind: 'round_ack_timeout', roundId});
-    try { save(failed); } catch {}
+    const outcome = outcomeSettlement.ackTimeout({task, roundId, timeoutMs});
+    runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
+    event(outcome.task, outcome.event);
+    try { save(outcome.task); } catch {}
   }
   /** A round deadline requests a stop; a failed stop must not look like a timeout. */
   function stopAfterRoundTimeout(rec, timeoutMs) {
@@ -899,7 +855,7 @@ export function createManager(options = {}) {
     // task directory or record is written. A rejected request therefore leaves
     // the task list, directories, files, and grants untouched.
     const id = `task-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
-    const preflight = preflightCreate(a, id);
+    const preflight = commandModule.create(a, {taskId: id});
     const dir = directory(id);
     const created = tasks.create({
       taskId: id,
@@ -986,44 +942,23 @@ export function createManager(options = {}) {
       case 'create': return createTask(a);
       case 'rework': {
         const t = get(a.id);
-        // Strict validation happens before any state, round, budget, grant, or file change.
-        const currentLimits = effectiveUsageLimits(t);
-        const requestedLimits = resolveLimitOverride(a.usageLimits, currentLimits);
-        const override = parseOverride(a);
-        const requested = parseOptionalMaxTokens(a.maxTokens);
-        const requestedEffort = parseOptionalEffort(a.effort);
-        if (requestedEffort !== undefined && !supportsEffort(t.provider)) {
-          throw new Error(`effort is not supported by provider "${t.provider?.name ?? 'unknown'}" (${t.provider?.type ?? 'unknown'})`);
-        }
-        validatePrompt(a.prompt);
-        const snapshot = usageSnapshot(t, {persist: false});
-        const usage = snapshot.statusUsage;
-        const decision = decideRework({
-          baseBlockedReason: baseReworkBlockedReason(t),
-          usage,
-          override,
+        const inputs = usageModule.reworkInputs(t, a);
+        const validated = commandModule.validateRework(t, a, {usageDecision: inputs});
+        const decision = usageModule.decideRework(t, directory(t.id), a, {
+          inputs,
+          baseBlockedReason: () => baseReworkBlockedReason(t),
         });
-        if (!decision.allowed) throw new Error(decision.reason);
-        const maxTokens = resolveRoundBudget({requested, inherited: t.maxTokens, fallback: config.maxTokens});
-        const effort = supportsEffort(t.provider)
-          ? resolveRoundEffort({requested: requestedEffort, inherited: t.effort ?? undefined,
-            fallback: config.defaultEffort ?? DEFAULT_EFFORT})
-          : null;
-        const afterLimits = requestedLimits ?? currentLimits;
-        if (decision.overridden) {
-          t.lastLimitOverride = {at: new Date().toISOString(), reason: override.reason};
-          const payload = overrideEvent({
-            at: t.lastLimitOverride.at,
-            reason: override.reason,
-            usage,
-            before: currentLimits,
-            after: afterLimits,
-          });
-          delete payload.at;
+        const command = commandModule.rework(t, a, {
+          usageDecision: {...inputs, decision: decision.decision},
+          validated,
+        });
+        usageModule.applyRework(t, decision);
+        if (decision.event) {
+          const payload = {...decision.event};
+          delete payload.overrideAt;
           event(t, payload);
         }
-        if (requestedLimits) t.usageLimits = requestedLimits;
-        return executeRun(t, a.prompt, maxTokens, effort);
+        return executeRun(t, command.prompt, command.maxTokens, command.effort);
       }
       case 'cleanup_worktree': {
         const t = get(a.id);
