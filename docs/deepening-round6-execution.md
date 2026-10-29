@@ -8,7 +8,7 @@
 
 ## 当前状态
 
-执行中。
+完成。17 项全部落地，每项一个提交；最终门禁全部通过。
 
 ## 起点与基线
 
@@ -275,3 +275,49 @@
 - 完整测试：`363/363` 通过，49 个测试文件。
 - 发布树：`292` 个文件通过；`package:smoke` 通过；Rust `cargo test --locked` 19/19。
 - 遗留：`src/usage/service.mjs` 仍导入 `prototype/usage.mjs`，随兼容层在 0.3.0 一起删除。`server.mjs`、`worker.mjs`、`manager.mjs` 仍在 `prototype/`（进程入口与组装处）；Worker 仍自行加载配置中的 providersDir/model，而不是从 manager 接收，跨上下文运行真实 Worker 时这一点仍需后续处理。
+
+## 提交索引
+
+| 项 | 提交 | 说明 |
+| --- | --- | --- |
+| #16 | `39af124` | Discover tests, source modules, and packaged prototype files |
+| #1 | `4184d0f` | Keep the runtime handle until forget |
+| #2 | `0cf9594` | Share one durable write implementation |
+| #3 | `acf6d6a` | Commit close reports through AcceptanceService |
+| #4 | `9c08fa9` | Share one text paging rule |
+| #5 | `b0e153e` | Build the worker adapter per round provider |
+| #17 | `69b3f7b` | Move the local override out of the install directory |
+| #6 | `ff56c66` | Project every runtime fact through one Settlement |
+| #7 | `7b298c4` | Write tasks through one commit path |
+| #8 | `7395548` | Answer rework eligibility in one module |
+| #9 | `43605c9` | Drive every entry from one operation catalogue |
+| #10 | `cac1cd5` | Define the round protocol in one module |
+| #11 | `bca7397` | Make the Provider seam real |
+| #12 | `0bcfdda` | Separate usage metrics from limits |
+| #13 | `33ae86d` | Give research a narrow manager interface |
+| #14 | `9ffcf86` | Let Node interpret desktop configuration |
+| #15 | `20e6766` | Assemble the manager from an explicit context |
+
+## 最终门禁
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm test` | 363/363 通过，49 个测试文件 |
+| `npm run check:release-tree` | 292 个文件通过 |
+| `npm run package:smoke` | 通过（含打包后 CLI 健康检查与 MCP 初始化） |
+| `npm run desktop:resources` | 通过 |
+| `npm --prefix desktop run typecheck` | 通过 |
+| `npm --prefix desktop run build` | 通过 |
+| `cargo fmt --check` | 通过 |
+| `cargo check --locked` | 通过 |
+| `cargo test --locked` | 19/19 通过 |
+| `git diff --check` | 通过 |
+
+与基线相比：JavaScript 从 256 涨到 363，测试文件从 34 涨到 49；发布树从 248 涨到 292；Rust 从 11 涨到 19。
+
+## 待权儿决定
+
+1. `grant_delete` 的暴露范围（#9）：目前只从 MCP 目录隐藏，网关对任何持有 token 的进程仍接受。是否需要仅桌面端或 CLI 交互确认才可用？
+2. Worker 文件工具的路径范围（#11）：`read_file`/`write_file` 仍接受任意绝对路径；Worker 同时有 Bash 工具，因此这不构成额外权限边界。是否限制在工作区内？
+3. openai-chat 的 rework 上下文：`task.history` 从未被设置，openai-chat 每次返工从空对话开始。是否另开任务？
+4. 弃用导出的删除版本：`UsageService`、`RuntimeSupervisor`、`taskPageView`、`TaskCommandModule`（若并回）按 0.3.0 删除处理，是否同意？
