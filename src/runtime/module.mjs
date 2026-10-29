@@ -76,10 +76,25 @@ export class Runtime {
   }
 
   // --- identity state --------------------------------------------------------
-  /** True while an owned process handle is retained, so the workspace stays locked. */
+  /**
+   * True while an owned handle is retained, including one whose process has
+   * already exited. The handle outlives the exit so a failed final save can be
+   * retried; only `forget` removes it.
+   */
   has(id) { return this.records.has(id); }
   get(id) { return this.records.get(id) ?? null; }
+  /** Every retained handle, exited-but-unforgotten ones included. */
   ids() { return [...this.records.keys()]; }
+  /**
+   * True only while the owned process has not been observed to exit. Callers
+   * that mean "a Worker is (or may be) writing" use this instead of `has`.
+   */
+  isLive(id) {
+    const rec = this.records.get(id);
+    return Boolean(rec) && rec.phase !== 'exited';
+  }
+  /** Ids of processes that have not been observed to exit. */
+  liveIds() { return [...this.records.values()].filter(rec => rec.phase !== 'exited').map(rec => rec.id); }
   /** Drop an owned handle once its exit is demonstrably confirmed. */
   forget(id) {
     const rec = this.records.get(id);
@@ -435,7 +450,8 @@ export class Runtime {
     // A runtime that exited before releasing its round may never resume, so
     // whoever waits at the gate gets false rather than a silent stall.
     this.supervisor.settleRelease(rec, false);
-    this.records.delete(taskId);
+    // The handle stays until `forget`: a terminal record that failed to save
+    // must still find a retryable `stopping` task. `isLive` reports the exit.
     const task = this.hooks.latest?.(taskId);
     try { if (task) this.persist(task, rec, {exitCode: code}); } catch {}
     if (task?.status === 'running') {

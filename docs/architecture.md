@@ -22,7 +22,7 @@ interface.
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
-| `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff |
+| `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff; a handle is retained until `forget`, so a failed final save stays retryable |
 | `src/runtime/close-outcome.mjs` | Confirmed-exit close projection, cleanup failure, and handle-release decision |
 | `src/runtime/lifecycle.mjs` | Restart recovery projection: verified termination, manual retention, confirmed exit |
 | `src/runtime/outcome.mjs` | Runtime terminal outcome, first-round fallback, protocol failure, and ACK timeout projection |

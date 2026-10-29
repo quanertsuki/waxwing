@@ -169,7 +169,7 @@ export function createManager(options = {}) {
     waitForTaskChanges: (ids, timeoutMs) => taskChanges.wait(ids, timeoutMs),
     canCloseTask: id => {
       const rec = workers.get(id);
-      return !rec || rec.phase === 'idle';
+      return !workers.live(id) || rec.phase === 'idle';
     },
   });
   let shuttingDown = false;
@@ -187,7 +187,7 @@ export function createManager(options = {}) {
     return saved;
   };
   function fullView(t) {
-    return {...t, live: workers.has(t.id), cleanupAuthorized: acceptance.hasGrant(t.id),
+    return {...t, live: workers.live(t.id), cleanupAuthorized: acceptance.hasGrant(t.id),
       dataDirectory: directory(t.id), report: path.join(REPORTS, `${t.id}.md`),
       runtime: t.runtime ?? null};
   }
@@ -224,7 +224,7 @@ export function createManager(options = {}) {
   function workspaceConflict(workspace, excludeId) {
     return workspaceLeases.conflictFor(workspace, [...repository.values()], {
       excludeId,
-      live: id => workers.has(id),
+      live: id => workers.live(id),
     });
   }
   /**
@@ -234,13 +234,16 @@ export function createManager(options = {}) {
   function baseReworkBlockedReason(t) {
     if (shuttingDown) return 'Manager is shutting down; rework is refused';
     const rec = workers.get(t.id);
+    const live = workers.live(t.id);
     // closed / accepted / running / stopping preconditions are the Acceptance
     // module's policy; runtime, round, and workspace reasons stay here.
     const acceptanceRefusal = acceptance.reworkRefusal(t, {closing: Boolean(rec?.closing)});
     if (acceptanceRefusal) return acceptanceRefusal;
+    // A retained handle's recorded reason (broken IPC, protocol error, ACK
+    // timeout) is more actionable than the generic "runtime is gone".
     if (rec?.unreworkableReason) return rec.unreworkableReason;
     if (t.rounds.length >= config.maxRounds) return `Maximum ${config.maxRounds} rounds reached; create a new task for further work`;
-    if (!rec && t.rounds.length > 0) {
+    if (!live && t.rounds.length > 0) {
       return `Original runtime is gone; this DSH cannot resume sessionId ${t.sessionId} in a new runtime; create a new task for follow-up work`;
     }
     const conflict = workspaceConflict(t.workspace, t.id);
@@ -358,7 +361,9 @@ export function createManager(options = {}) {
    * process exit is confirmed, and the error says so explicitly.
    */
   function failStart(id, error) {
-    const runtimeUnconfirmed = workers.has(id);
+    // "May still be running" means the handle is retained and no exit event
+    // has been observed; an exited-but-unforgotten handle is not a live risk.
+    const runtimeUnconfirmed = workers.held(id) && !runtime.hasExited(id);
     const message = `Task ${id} failed to start: ${error.message}${runtimeUnconfirmed ? '; runtime exit not confirmed (process may still be running)' : ''}`;
     const cur = repository.peek(id);
     if (cur) {
@@ -413,7 +418,7 @@ export function createManager(options = {}) {
     });
     item.maxTokens = effectiveMaxTokens(t);
     item.cleanupAuthorized = acceptance.hasGrant(t.id);
-    item.live = workers.has(t.id);
+    item.live = workers.live(t.id);
     if (t.error && error.truncated) item.errorTruncated = true;
     if (withPaths) {
       const sourceWorkspace = t.sourceWorkspace ?? t.workspaceLease?.sourceWorkspace ?? t.workspace;
@@ -526,7 +531,7 @@ export function createManager(options = {}) {
     const payload = {
       id: t.id,
       view: 'workspace',
-      live: workers.has(t.id),
+      live: workers.live(t.id),
       executionWorkspace: t.workspace,
       sourceWorkspace: t.sourceWorkspace ?? inspected.sourceWorkspace,
       workspaceLease: t.workspaceLease ?? null,
@@ -708,13 +713,16 @@ export function createManager(options = {}) {
     supportsEffort: provider => supportsEffort(provider),
   });
   /**
-   * Liveness facade. A live handle keeps the workspace locked, so every caller
-   * that used to read the raw handles map still reads the same truth here.
+   * Liveness facade. Two questions must stay distinct: `live` means the owned
+   * process has not been observed to exit, so it may still write files; `held`
+   * means the handle is retained until `forget`, which is what a failed final
+   * save needs in order to retry.
    */
   const workers = {
-    has: id => runtime.has(id),
+    live: id => runtime.isLive(id),
+    held: id => runtime.has(id),
     get: id => runtime.get(id),
-    keys: () => runtime.ids(),
+    liveKeys: () => runtime.liveIds(),
   };
   const tasks = new TaskTransaction({
     runtime,
@@ -854,7 +862,7 @@ export function createManager(options = {}) {
   }
   /** Preview/deletion preconditions and the fingerprint live in the module. */
   function deletionPreview(t) {
-    return acceptance.preview(t, {directory: directory(t.id), live: workers.has(t.id)});
+    return acceptance.preview(t, {directory: directory(t.id), live: workers.live(t.id)});
   }
   async function createTask(a = {}) {
     // All request, budget, workspace, and occupancy checks happen before any
@@ -878,7 +886,7 @@ export function createManager(options = {}) {
         workspaceMode: a.workspaceMode ?? config.workspaceMode ?? 'auto',
         conflictFor: workspace => {
           const conflict = workspaceConflict(workspace);
-          return conflict ? {...conflict, live: workers.has(conflict.id)} : null;
+          return conflict ? {...conflict, live: workers.live(conflict.id)} : null;
         },
       },
       buildRecord: ({lease}) => {
@@ -968,7 +976,7 @@ export function createManager(options = {}) {
       }
       case 'cleanup_worktree': {
         const t = get(a.id);
-        const result = workspaceLeases.release({task: t, live: workers.has(t.id)});
+        const result = workspaceLeases.release({task: t, live: workers.live(t.id)});
         event(t, {kind: 'worktree_cleaned', ...result});
         save(t);
         return {id: t.id, ...result};
@@ -1000,7 +1008,7 @@ export function createManager(options = {}) {
         const t = get(a.id);
         return acceptance.grant(t, {
           directory: directory(t.id),
-          live: workers.has(t.id),
+          live: workers.live(t.id),
           confirmation: a.confirmation,
         });
       }
@@ -1010,7 +1018,7 @@ export function createManager(options = {}) {
         const t = get(a.id);
         return acceptance.removeTaskAndForget(t, {
           directory: directory(t.id),
-          live: workers.has(t.id),
+          live: workers.live(t.id),
           forget: id => {
             repository.delete(id);
             eventSequences.delete(id);
@@ -1022,7 +1030,7 @@ export function createManager(options = {}) {
   }
   async function shutdown() {
     if (shuttingDown) return; shuttingDown = true;
-    await Promise.allSettled([...workers.keys()].map(id => stop(id, true)));
+    await Promise.allSettled([...workers.liveKeys()].map(id => stop(id, true)));
   }
   return {action, restore: restoreTasks, shutdown};
 }

@@ -353,8 +353,11 @@ test('exit confirmation is reported only for a real exit event', async () => {
   assert.equal(await exited, true);
   assert.equal(await gate, false, 'an exit before release must not look like a release');
   assert.equal(gateValue, false);
-  assert.equal(runtime.has(task.id), false, 'the confirmed exit removes the owned handle');
-  assert.equal(runtime.forget(task.id), false);
+  assert.equal(runtime.has(task.id), true, 'the confirmed exit retains the handle until forget');
+  assert.equal(runtime.isLive(task.id), false, 'an exited process is not live');
+  assert.equal(runtime.forget(task.id), true, 'forget drops the retained handle');
+  assert.equal(runtime.has(task.id), false);
+  assert.deepEqual(runtime.ids(), []);
   assert.equal(handles.length, 1);
 });
 
@@ -442,8 +445,10 @@ test('a close error survives process exit until the handle is forgotten', () => 
   handle.emit('message', {kind: 'close_error', error: 'harness close failed'});
   handle.exitWith(1);
 
-  assert.equal(runtime.has(task.id), false, 'the process exit removes the owned record');
+  assert.equal(runtime.has(task.id), true, 'the process exit retains the owned record until forget');
+  assert.equal(runtime.isLive(task.id), false);
   assert.equal(runtime.closeError(task.id), 'harness close failed');
-  runtime.forget(task.id);
+  assert.equal(runtime.forget(task.id), true);
+  assert.equal(runtime.has(task.id), false);
   assert.equal(runtime.closeError(task.id), null);
 });

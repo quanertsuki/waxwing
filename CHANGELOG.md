@@ -14,6 +14,12 @@ and uses semantic versioning for public releases.
   portable desktop backend copies exactly the `prototype/` files `package.json`
   publishes
 
+### Fixed
+
+- A process exit no longer drops the Runtime handle immediately: the handle is
+  retained until `forget`, so a failed final close save can be retried instead
+  of leaving the task stuck in `stopping`
+
 ## [0.2.0] - 2026-10-28
 
 ### Changed

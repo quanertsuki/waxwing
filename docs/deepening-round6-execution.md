@@ -39,3 +39,18 @@
 - 完整测试：`265/265` 通过，36 个测试文件。
 - 发布树：`251` 个文件通过。
 - 遗留：无。
+
+### 阶段 1：P0 正确性缺陷
+
+#### #1 Runtime 句柄活到 `forget`
+
+状态：完成。
+
+- `src/runtime/module.mjs`：`onProcessExit` 不再删除记录，只把句柄标为 `exited`；新增 `isLive(id)` / `liveIds()` 区分“活着的进程”和“尚未遗忘的句柄”。`has()`/`get()`/`ids()` 现在表示保留的句柄。
+- `src/tasks/transaction.mjs`：`stop()` 在退出已确认时跳过关闭消息，直接进入投影与保存。
+- `prototype/manager.mjs`：`workers` 门面拆成 `live`/`held`；视图、工作区冲突、清理、预览、授权、删除、关闭全部用 `live`；`failStart` 用 `held && !hasExited` 判断“进程可能仍在运行”；rework 的“运行时已消失”改用 `live`。
+- 决定：进程意外退出后，句柄由下一次 `stop`/`close` 遗忘；启动恢复只清理 `runtime.json` 对应的残留进程，不触碰句柄表（新进程里本来就是空的）。
+- 目标测试：`task-transaction.test.mjs` 新增 3 项，全部使用真实 `Runtime` + 假子进程（退出后终态保存失败 → 重试成功；正常关闭遗忘句柄；意外退出保留句柄直到 close）。`runtime-module.test.mjs` 改断言为退出后保留、`forget` 后消失。
+- 完整测试：`268/268` 通过，36 个测试文件。
+- 发布树：`252` 个文件通过（阶段 0 为 251，新增本执行文档时逐步增加）。
+- 遗留：无。

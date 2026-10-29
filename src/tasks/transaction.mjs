@@ -112,7 +112,11 @@ export class TaskTransaction {
         : transition(existing, 'begin_stop');
       this.save(stopping);
       this.event(stopping, {kind: 'stop_requested', closed});
-      if (this.runtime.sendClose(taskId)) this.untrusted(taskId, 'close IPC send failure');
+      // A retained handle whose process already exited has nobody to ask;
+      // skip the close message and go straight to the exit projection.
+      if (!this.runtime.hasExited?.(taskId) && this.runtime.sendClose(taskId)) {
+        this.untrusted(taskId, 'close IPC send failure');
+      }
 
       const graceful = await this.runtime.waitForExit(taskId, this.gracefulExitTimeoutMs);
       if (!graceful) {
