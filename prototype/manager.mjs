@@ -25,9 +25,11 @@ import {ChangeNotifier} from '../src/tasks/change-notifier.mjs';
 import {
   normalizeTaskDetail,
   taskListView,
+  taskPageView,
   taskSummaryView,
   workspaceLabel,
 } from '../src/tasks/view.mjs';
+import {DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, pageOf, safeOffset, safePageLimit} from '../src/view/page.mjs';
 import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
 import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
@@ -41,8 +43,6 @@ const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/')
 const SUMMARY_LIMIT = 120;
 const ERROR_LIMIT = 240;
 const PREVIEW_LIMIT = 400;
-const DEFAULT_PAGE_LIMIT = 2000;
-const MAX_PAGE_LIMIT = 4000;
 const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
 const ACTIVE_TASK = new Set(['created', 'running', 'stopping']);
@@ -71,45 +71,6 @@ function clip(value, max) {
 }
 function summaryText(value) {
   return clip(oneLine(value), SUMMARY_LIMIT);
-}
-/**
- * Slice one page of a string. Offsets are UTF-16 code-unit offsets; an offset
- * inside a surrogate pair is rejected, and page boundaries never split one.
- * Pages never exceed `limit` in code units. `nextOffset === null` marks the
- * final page.
- */
-function pageOf(value, offset, limit) {
-  const text = typeof value === 'string' ? value : '';
-  const totalChars = text.length;
-  // An offset in the middle of a surrogate pair cannot start a valid page.
-  // Reject it explicitly instead of returning a lone low surrogate.
-  if (offset > 0 && offset < totalChars && isLowSurrogate(text.charCodeAt(offset)) && isHighSurrogate(text.charCodeAt(offset - 1))) {
-    throw new Error(`offset ${offset} splits a surrogate pair; use the previous nextOffset`);
-  }
-  const start = Math.min(offset, totalChars);
-  let end = Math.min(start + limit, totalChars);
-  if (end < totalChars && end > start) {
-    if (isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
-      // A pair at the boundary: shrink the page rather than emit a lone
-      // surrogate. With limit=1 there is no room to shrink, so fail clearly.
-      if (end - start === 1) throw new Error('limit is too small to advance over a surrogate pair; use limit >= 2');
-      end -= 1;
-    }
-  }
-  return {text: text.slice(start, end), offset: start, limit, totalChars,
-    nextOffset: end < totalChars ? end : null, complete: end >= totalChars};
-}
-function safeOffset(value, label = 'offset') {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${label} must be a non-negative safe integer`);
-  }
-  return value;
-}
-function safePageLimit(value, label = 'limit') {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > MAX_PAGE_LIMIT) {
-    throw new Error(`${label} must be a safe integer between 1 and ${MAX_PAGE_LIMIT}`);
-  }
-  return value;
 }
 /** Parse the optional status view and pagination args, rejecting bad types. */
 function statusQuery(a) {
@@ -507,19 +468,21 @@ export function createManager(options = {}) {
   function resultPage(t, offset, limit) {
     const last = t.rounds.at(-1);
     const text = latestResultText(t);
-    return {id: t.id, view: 'result', round: last?.number ?? null,
-      finishReason: last?.result?.finishReason ?? null, ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'result', pageOf(text, offset, limit), {
+      round: last?.number ?? null,
+      finishReason: last?.result?.finishReason ?? null,
+    });
   }
   /** Complete persisted record as reconstructable JSON text, one page at a time. */
   function historyPage(t, offset, limit) {
     const text = JSON.stringify(fullView(t), null, 2);
-    return {id: t.id, view: 'history', ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'history', pageOf(text, offset, limit));
   }
   /** Usage metrics and per-request detail as reconstructable JSON text. */
   function usagePage(t, offset, limit) {
     const payload = usageModule.view(t, directory(t.id));
     const text = JSON.stringify(payload, null, 2);
-    return {id: t.id, view: 'usage', ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'usage', pageOf(text, offset, limit));
   }
   function workspacePage(t, offset, limit) {
     const inspected = workspaceLeases.inspect(t.workspaceLease, t.workspace);
@@ -544,18 +507,15 @@ export function createManager(options = {}) {
       runtime,
     };
     const text = JSON.stringify(payload, null, 2);
-    return {id: t.id, view: 'workspace', ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'workspace', pageOf(text, offset, limit));
   }
   function diffPage(t, offset, limit) {
     const inspected = workspaceLeases.inspect(t.workspaceLease, t.workspace);
-    return {
-      id: t.id,
-      view: 'diff',
+    return taskPageView(t.id, 'diff', pageOf(inspected.diff ?? '', offset, limit), {
       branch: inspected.branch ?? null,
       baseCommit: inspected.baseCommit ?? null,
       status: inspected.status ?? '',
-      ...pageOf(inspected.diff ?? '', offset, limit),
-    };
+    });
   }
   function logPage(t, offset, limit) {
     const file = path.join(directory(t.id), 'runtime.log');
@@ -574,11 +534,11 @@ export function createManager(options = {}) {
     } catch (error) {
       if (error.code !== 'ENOENT') content = `(runtime log unavailable: ${shortMessage(error)})`;
     }
-    return {id: t.id, view: 'log', path: file, ...pageOf(content, offset, limit)};
+    return taskPageView(t.id, 'log', pageOf(content, offset, limit), {path: file});
   }
   function reportPage(t, offset, limit) {
     const content = acceptance.content(t);
-    return {id: t.id, view: 'report', ...pageOf(content, offset, limit)};
+    return taskPageView(t.id, 'report', pageOf(content, offset, limit));
   }
   function event(t, data) {
     const persisted = repository.peek(t.id);

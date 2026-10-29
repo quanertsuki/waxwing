@@ -17,6 +17,9 @@ and uses semantic versioning for public releases.
   and the SHA-256 helper; common, budget, usage-index, acceptance, research
   capture, and research report writes all use it (unique temporary names,
   Windows rename retry, cleanup on failure)
+- Task status views and research reports share one paging rule: an offset past
+  the end clamps to an empty final page, an offset inside a surrogate pair is
+  rejected, and every page reports `complete`
 
 ### Fixed
 

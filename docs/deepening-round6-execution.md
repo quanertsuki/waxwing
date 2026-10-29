@@ -78,3 +78,14 @@
 - 完整测试：`277/277` 通过，38 个测试文件。
 - 发布树：`255` 个文件通过。
 - 遗留：无。
+
+#### #4 文本分页只有一份实现
+
+状态：完成。
+
+- 新增 `src/view/page.mjs`：`DEFAULT_PAGE_LIMIT=2000`、`MAX_PAGE_LIMIT=4000`、`safeOffset`、`safePageLimit`、`pageOf`，采用 manager 的规则（越界夹到末尾、拒绝切分代理对、`limit=1` 遇到代理对明确报错、带 `complete`）。
+- `prototype/manager.mjs` 删除本地实现，七个视图统一经 `taskPageView` 拼装；`src/research/report.mjs` 删除自己的一份分页，改用共享规则，因此 research collect 不再对越界 offset 抛错。
+- 目标测试：`page.test.mjs` 5 项——常量；emoji 文本 limit 2/3/4 逐页翻完且拼接等于原文、`nextOffset` 严格递增；limit=1 与代理对中间 offset 明确报错；越界 offset 夹成空页；research collect 与 task status 对同一组越界/非法参数结果与错误文本一致。
+- 完整测试：`282/282` 通过，39 个测试文件。
+- 发布树：`257` 个文件通过。
+- 遗留：无。

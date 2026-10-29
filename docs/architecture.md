@@ -20,6 +20,7 @@ interface.
 | `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation |
 | `src/tasks/command.mjs` | Create/rework command validation order and transaction inputs |
 | `src/tasks/view.mjs` | Stable bounded list/summary/detail/page contract shared by CLI, MCP, Rust, and Vue |
+| `src/view/page.mjs` | One paging rule: bounds, surrogate-pair safety, `nextOffset`, `complete` |
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
