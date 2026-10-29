@@ -17,7 +17,14 @@
 // decides by itself that a deletion is allowed.
 import fs from 'node:fs';
 import path from 'node:path';
-import {createHash} from 'node:crypto';
+import {
+  DEFAULT_FILES as DURABLE_FILES,
+  atomicWriteJson,
+  beginReplace,
+  sha256,
+} from '../storage/durable-file.mjs';
+
+export {sha256};
 
 /** Task IDs are the only path segment this module ever builds or deletes. */
 const TASK_ID = /^task-[a-f0-9]{12}$/;
@@ -32,60 +39,17 @@ const SCRATCH_ERROR = 'Refused deletion preview: the directory is not the task s
 const CONTAIN_ERROR = 'Refused deletion preview: the preserved path is inside the task scratch directory';
 const LINK_ERROR = 'Unexpected redirected path during cleanup';
 
-/** The one hash the report body, the preview fingerprint, and grants share. */
-export function sha256(value) {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-const DEFAULT_FILES = {
-  existsSync: (...args) => fs.existsSync(...args),
-  mkdirSync: (...args) => fs.mkdirSync(...args),
-  renameSync: (...args) => fs.renameSync(...args),
-  rmSync: (...args) => fs.rmSync(...args),
-  writeFileSync: (...args) => fs.writeFileSync(...args),
-};
-
 /**
  * Write one report without ever exposing a half-written body. The previous
  * report is kept until the caller commits, so a failed task save can restore
  * the exact bytes that existed before the attempt.
  */
-function beginReportFile(file, content, digest, files = DEFAULT_FILES) {
-  files.mkdirSync(path.dirname(file), {recursive: true});
-  const temporary = `${file}.${process.pid}.new`;
-  const backup = `${file}.${process.pid}.bak`;
-  const hadPrevious = files.existsSync(file);
-  try {
-    files.writeFileSync(temporary, content);
-    if (hadPrevious) files.renameSync(file, backup);
-    files.renameSync(temporary, file);
-  } catch (error) {
-    if (hadPrevious) {
-      try { files.renameSync(backup, file); } catch {}
-    }
-    try { files.rmSync(temporary, {force: true}); } catch {}
-    throw error;
-  }
-  return {
-    file,
-    content,
-    hash: digest(content),
-    commit() {
-      if (hadPrevious) {
-        try { files.rmSync(backup, {force: true}); } catch {}
-      }
-    },
-    rollback() {
-      try { files.rmSync(file, {force: true}); } catch {}
-      if (hadPrevious) {
-        try { files.renameSync(backup, file); } catch {}
-      }
-    },
-  };
+function beginReportFile(file, content, digest, files = DURABLE_FILES) {
+  return beginReplace(file, content, {files, digest});
 }
 
 /** Compatibility helper: write and immediately commit one report. */
-export function writeReportFile(file, content, {digest = sha256, files = DEFAULT_FILES} = {}) {
+export function writeReportFile(file, content, {digest = sha256, files = DURABLE_FILES} = {}) {
   const report = beginReportFile(file, content, digest, files);
   report.commit();
   return {file, hash: report.hash};
@@ -209,20 +173,6 @@ export function writeTaskReport(task, {reportsDir, digest = sha256, policySectio
   return writeReportFile(file, content, {digest});
 }
 
-function writeGrantFile(file, grant) {
-  fs.mkdirSync(path.dirname(file), {recursive: true});
-  const temporary = `${file}.${process.pid}.new`;
-  fs.writeFileSync(temporary, JSON.stringify(grant, null, 2), {mode: 0o600});
-  try {
-    fs.renameSync(temporary, file);
-  } catch (error) {
-    try {
-      fs.rmSync(temporary, {force: true});
-    } catch {}
-    throw error;
-  }
-}
-
 /**
  * Owns reports, hashes, deletion previews, grants, and the acceptance
  * preconditions. One instance per manager; grants are kept in memory and
@@ -240,7 +190,7 @@ export class AcceptanceService {
     this.grantsDir = grantsDir;
     this.digest = digest;
     this.now = now;
-    this.files = {...DEFAULT_FILES, ...(files ?? {})};
+    this.files = {...DURABLE_FILES, ...(files ?? {})};
     this.grants = new Map();
   }
 
@@ -382,8 +332,8 @@ export class AcceptanceService {
     this.assertConfirmation(task?.id, confirmation);
     const preview = this.preview(task, {directory, live});
     const grant = {id: task.id, fingerprint: preview.fingerprint, at: this.now(), scope: GRANT_SCOPE};
+    atomicWriteJson(this.grantPath(task.id), grant, {files: this.files});
     this.grants.set(task.id, grant);
-    writeGrantFile(this.grantPath(task.id), grant);
     return preview;
   }
 

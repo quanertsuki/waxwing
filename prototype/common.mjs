@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {randomUUID} from 'node:crypto';
 import {loadConfiguration} from './config.mjs';
+import {atomicWriteJson} from '../src/storage/durable-file.mjs';
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 const loaded = loadConfiguration({here: HERE});
 export const config = loaded.config;
@@ -114,25 +114,7 @@ export function ensureDirs() {
   for (const p of [RUNS, REPORTS, RUNTIME]) fs.mkdirSync(p, {recursive:true});
 }
 export function atomicJson(file, data) {
-  fs.mkdirSync(path.dirname(file), {recursive:true});
-  const temporary = `${file}.${process.pid}.${randomUUID()}.new`;
-  fs.writeFileSync(temporary, JSON.stringify(data, null, 2), {mode:0o600});
-  // Windows antivirus/indexers can briefly hold the destination open, turning
-  // a valid replace into EPERM or EACCES. Retry the rename without ever writing
-  // the destination in place, so readers still see either old or new JSON.
-  const transient = new Set(['EPERM', 'EACCES', 'EBUSY']);
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      fs.renameSync(temporary, file);
-      return;
-    } catch (error) {
-      if (!transient.has(error.code) || attempt >= 20) {
-        try { fs.unlinkSync(temporary); } catch {}
-        throw error;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * (attempt + 1));
-    }
-  }
+  return atomicWriteJson(file, data, {mode: 0o600});
 }
 export function cleanEnvironment(temp) {
   fs.mkdirSync(temp, {recursive:true});

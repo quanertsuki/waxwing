@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {createHash, randomUUID} from 'node:crypto';
+import {randomUUID} from 'node:crypto';
+import {sha256} from '../storage/durable-file.mjs';
 import {
   aggregateBatchStatus,
   countByShardStatus,
@@ -43,10 +44,6 @@ function waitSeconds(value) {
 function preview(value, limit = 240) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
-}
-
-function digest(value) {
-  return createHash('sha256').update(value).digest('hex');
 }
 
 function normalizeShard(value, index) {
@@ -107,7 +104,7 @@ export class ResearchBatchService {
     canCloseTask = () => true,
     now = () => new Date().toISOString(),
     makeId = () => `research-${randomUUID().replaceAll('-', '').slice(0, 12)}`,
-    digestText = digest,
+    digestText = sha256,
     files = fs,
   }) {
     if (typeof atomicJson !== 'function') throw new Error('atomicJson dependency is required');

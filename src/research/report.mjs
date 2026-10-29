@@ -1,14 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {createHash} from 'node:crypto';
+import {atomicWriteText, sha256} from '../storage/durable-file.mjs';
 
 const DEFAULT_PAGE_LIMIT = 2000;
 const MAX_PAGE_LIMIT = 4000;
-let tempCounter = 0;
-
-function digest(value) {
-  return createHash('sha256').update(value).digest('hex');
-}
 
 function safeOffset(value) {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
@@ -45,7 +40,7 @@ export function pageOf(value, offset, limit) {
  * making the whole collection fail.
  */
 export class ResearchReport {
-  constructor({reportsDir, repository, files = fs, digestText = digest}) {
+  constructor({reportsDir, repository, files = fs, digestText = sha256}) {
     if (!repository) throw new Error('repository dependency is required');
     this.reportsDir = path.resolve(reportsDir);
     this.repository = repository;
@@ -115,17 +110,7 @@ export class ResearchReport {
   write(batch, content) {
     const file = this.file(batch.id);
     this.files.mkdirSync(this.reportsDir, {recursive: true});
-    const temp = `${file}.${process.pid}.${++tempCounter}.tmp`;
-    try {
-      this.files.writeFileSync(temp, content);
-      this.files.renameSync(temp, file);
-    } catch (error) {
-      try {
-        this.files.rmSync(temp, {force: true});
-      } catch {}
-      throw error;
-    }
-    return file;
+    return atomicWriteText(file, content, {files: this.files});
   }
 
   collect(batch, options = {}) {

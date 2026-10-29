@@ -2,6 +2,7 @@
 // Used by the manager, the worker, the DSH plugin, and tests. No credentials.
 import fs from 'node:fs';
 import path from 'node:path';
+import {atomicWriteText} from '../src/storage/durable-file.mjs';
 
 /** Human-readable rendering of a rejected value for error messages. */
 export function describeValue(value) {
@@ -71,9 +72,9 @@ export function budgetFileFor(taskDir) {
  */
 export function writeRoundBudget(file, maxTokens) {
   const value = assertMaxTokens(maxTokens, 'round maxTokens');
-  const temp = `${file}.new`;
-  fs.writeFileSync(temp, `${JSON.stringify({maxTokens: value, updatedAt: new Date().toISOString()})}\n`, {mode: 0o600});
-  fs.renameSync(temp, file);
+  // The plugin re-reads this file on every request; a torn write would make a
+  // live round see an unparsable budget, so the replace is atomic.
+  atomicWriteText(file, `${JSON.stringify({maxTokens: value, updatedAt: new Date().toISOString()})}\n`, {mode: 0o600});
   return value;
 }
 

@@ -12,6 +12,7 @@ interface.
 | Module | Responsibility |
 | --- | --- |
 | `src/app.mjs` | Public composition root and stable exports |
+| `src/storage/durable-file.mjs` | Atomic text/JSON writes with transient-rename retry, replace-with-backup transactions, and the shared SHA-256 |
 | `src/adapters/cli.mjs` | CLI adapter; forwards no task-state mutations itself |
 | `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases |
 | `src/tasks/repository.mjs` | Task index, record validation, atomic `task.json` persistence |

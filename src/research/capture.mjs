@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {atomicWriteText} from '../storage/durable-file.mjs';
 
 /**
  * Capture one shard's terminal evidence: the task result when present, or the
@@ -24,8 +25,7 @@ export class ResearchCapture {
     }
     if (resultText) {
       const file = this.repository.resultFile(batch.id, shard.id);
-      this.files.mkdirSync(path.dirname(file), {recursive: true});
-      this.files.writeFileSync(file, resultText);
+      atomicWriteText(file, resultText, {files: this.files});
     }
     const finishReason = task.finishReason ?? task.rounds?.at(-1)?.result?.finishReason ?? null;
     if (task.status === 'cancelled') {
@@ -36,8 +36,7 @@ export class ResearchCapture {
       shard.error = task.error ?? 'Research shard failed without an error message';
       if (task.error) {
         const file = this.repository.errorFile(batch.id, shard.id);
-        this.files.mkdirSync(path.dirname(file), {recursive: true});
-        this.files.writeFileSync(file, task.error);
+        atomicWriteText(file, task.error, {files: this.files});
       }
     } else {
       shard.status = 'completed';

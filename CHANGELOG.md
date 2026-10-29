@@ -13,6 +13,10 @@ and uses semantic versioning for public releases.
 - The release check requires every module under `src/` by discovery; the
   portable desktop backend copies exactly the `prototype/` files `package.json`
   publishes
+- One `src/storage/durable-file.mjs` owns atomic writes, replace-with-backup,
+  and the SHA-256 helper; common, budget, usage-index, acceptance, research
+  capture, and research report writes all use it (unique temporary names,
+  Windows rename retry, cleanup on failure)
 
 ### Fixed
 

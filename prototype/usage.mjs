@@ -8,7 +8,7 @@
 // through list/status.
 import fs from 'node:fs';
 import path from 'node:path';
-import {createHash,randomUUID} from 'node:crypto';
+import {atomicWriteText, sha256 as hashBytes} from '../src/storage/durable-file.mjs';
 import {HERE,config} from './common.mjs';
 import {
     boundedReason,
@@ -47,9 +47,6 @@ function timeFromAt(value) {
     if (typeof value!=='string') return null;
     const parsed=Date.parse(value);
     return Number.isFinite(parsed)?parsed:null;
-}
-function hashBytes(value) {
-    return createHash('sha256').update(value).digest('hex');
 }
 function tokenCount(value) {
     return typeof value==='number'&&Number.isFinite(value)&&value>=0?value:0;
@@ -429,22 +426,18 @@ function processBuffer(index,buffer,baseOffset,task) {
     return baseOffset+lineStart;
 }
 function writeIndex(file,index,eventsFile) {
-    const temp=`${file}.${process.pid}.${randomUUID()}.new`;
     try {
-        fs.writeFileSync(temp,JSON.stringify(index),{mode:0o600});
         // Do not regress an index that another concurrent query already advanced.
         // A larger index is only authoritative while the event file still has at
         // least that many bytes; after a truncation our smaller rebuild wins.
         const current=loadIndex(file,index.taskId);
         const currentSize=statOrNull(eventsFile)?.size??0;
         if (current&&current.eventsBytes>index.eventsBytes&&current.eventsBytes<=currentSize) {
-            fs.unlinkSync(temp);
             return null;
         }
-        fs.renameSync(temp,file);
+        atomicWriteText(file,JSON.stringify(index),{mode:0o600});
         return null;
     } catch (error) {
-        try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch {}
         return `usage index write failed: ${shortError(error)}`;
     }
 }

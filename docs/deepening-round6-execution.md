@@ -54,3 +54,15 @@
 - 完整测试：`268/268` 通过，36 个测试文件。
 - 发布树：`252` 个文件通过（阶段 0 为 251，新增本执行文档时逐步增加）。
 - 遗留：无。
+
+#### #2 持久化写入工具
+
+状态：完成。
+
+- 新增 `src/storage/durable-file.mjs`：`atomicWriteText` / `atomicWriteJson`（唯一临时名、EPERM/EACCES/EBUSY 重试、失败清理）、`beginReplace`（写新文件、旧文件改名备份、提交或回滚）、`sha256`。文件操作可注入，默认 `node:fs`。
+- 调用方改为共用实现：`prototype/common.mjs`（`atomicJson`）、`prototype/budget.mjs`（`writeRoundBudget`，去掉固定 `.new` 文件名）、`prototype/usage.mjs`（索引写入与哈希）、`src/acceptance/service.mjs`（报告替换与授权文件）、`src/research/report.mjs`、`src/research/capture.mjs`、`src/research/service.mjs`、`src/usage/execution-policy.mjs`。
+- 保留原有的文件路径、JSON 缩进、报告哈希算法与输入。
+- 目标测试：`durable-file.test.mjs` 6 项（重试成功、永久失败清理与原文不变、并发写只有一个完整版本且无残留临时文件、提交删除备份、回滚恢复旧内容、首次回滚删除新文件、JSON 格式）。
+- 完整测试：`274/274` 通过，37 个测试文件。
+- 发布树：`254` 个文件通过。
+- 遗留：无。
