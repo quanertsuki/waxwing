@@ -18,6 +18,7 @@ export class TaskTransaction {
     repository,
     save,
     event = () => {},
+    commit = null,
     workspace = {},
     acceptance = {},
     now = () => new Date().toISOString(),
@@ -34,6 +35,7 @@ export class TaskTransaction {
     this.repository = repository;
     this.save = save;
     this.event = event;
+    this.commit = typeof commit === 'function' ? commit : null;
     this.workspace = workspace;
     this.acceptance = acceptance;
     this.now = now;
@@ -226,6 +228,7 @@ export class TaskTransaction {
     effort = null,
     policy = {meta: {}, text: null},
     configure,
+    events = [],
   } = {}) {
     const startedAt = this.now();
     let current = this.repository.peek(taskId);
@@ -261,7 +264,7 @@ export class TaskTransaction {
       };
     }
     const number = next.rounds.length + 1;
-    next.rounds.push({
+    next.rounds = [...next.rounds, {
       roundId,
       number,
       prompt,
@@ -269,9 +272,17 @@ export class TaskTransaction {
       maxTokens,
       effort,
       policy: policy?.meta ?? {},
-    });
-    this.save(next);
-    this.event(next, {kind: 'round_started', roundId, number, maxTokens, effort});
+    }];
+    const roundStarted = {kind: 'round_started', roundId, number, maxTokens, effort};
+    if (this.commit) {
+      // Extra events (a rework override) share the round-start commit, so a
+      // failed gate can no longer leave an event without the matching record.
+      this.commit(next, [...events, roundStarted]);
+    } else {
+      this.save(next);
+      for (const payload of events) this.event(next, payload);
+      this.event(next, roundStarted);
+    }
     return {task: next, roundId, number, startedAt};
   }
 

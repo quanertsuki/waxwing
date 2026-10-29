@@ -179,6 +179,18 @@ test('a failed round hands the Provider fallback over only after released', asyn
   assert.equal(runtime.get(task.id).pendingFallback, null, 'the handoff clears so it cannot repeat');
 });
 
+test('a repeated ready message is not another write', () => {
+  const {runtime, state, addTask, tasks} = harness();
+  const task = addTask(makeTask());
+  const {handle} = openAcked(runtime, task);
+  const ready = {kind: 'ready', ownerMarker: runtime.get(task.id).ownerMarker, pid: handle.pid};
+  const saves = state.saves;
+  handle.emit('message', ready);
+  handle.emit('message', ready);
+  assert.equal(state.saves, saves, 'unchanged ready state does not save');
+  assert.equal(tasks.get(task.id).runtimeReady, true);
+});
+
 test('a busy worker rejects the round without dispatch and is reported once', async () => {
   const {runtime, state, addTask} = harness();
   const task = addTask(makeTask());

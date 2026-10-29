@@ -116,9 +116,10 @@ test('UsageModule turns a blocked override into a detached event and explicit ap
   assert.equal(decision.event.kind, 'limit_override');
   assert.equal(decision.event.overrideAt, '2026-10-28T00:00:00.000Z');
   assert.equal(decision.requestedLimits.blockRequests, 9);
-  usage.applyRework(task, decision);
-  assert.equal(task.lastLimitOverride.at, '2026-10-28T00:00:00.000Z');
-  assert.equal(task.usageLimits.blockRequests, 9);
+  const reworked = usage.applyRework(task, decision);
+  assert.equal(task.lastLimitOverride, undefined, 'applyRework returns a new record');
+  assert.equal(reworked.lastLimitOverride.at, '2026-10-28T00:00:00.000Z');
+  assert.equal(reworked.usageLimits.blockRequests, 9);
 });
 
 test('UsageModule never throws for unavailable metrics', () => {

@@ -229,12 +229,12 @@ export class Runtime {
   reportHealth(task, rec, health, detail = null) {
     if (!rec || rec.health === health) return;
     rec.health = health;
-    task.runtimeHealth = health;
-    try { this.persist(task, rec, detail ? {healthDetail: detail} : {}); } catch {}
+    const next = {...task, runtimeHealth: health};
     try {
-      this.hooks.event?.({task, payload: {kind: 'runtime_health', health, detail}});
-      this.hooks.save?.({task});
+      const runtime = this.persist(next, rec, detail ? {healthDetail: detail} : {});
+      if (runtime) next.runtime = runtime;
     } catch {}
+    this.#commit(next, {kind: 'runtime_health', health, detail});
   }
 
   /**
@@ -317,8 +317,12 @@ export class Runtime {
     };
     this.records.set(task.id, rec);
     this.closeErrors.delete(task.id);
-    task.runtimeHealth = rec.health;
-    try { this.persist(task, rec); } catch {}
+    const next = {...task, runtimeHealth: rec.health};
+    try {
+      const runtime = this.persist(next, rec);
+      if (runtime) next.runtime = runtime;
+    } catch {}
+    this.#commit(next);
     for (const stream of [handle.stdout, handle.stderr]) {
       stream?.on?.('data', chunk => this.hooks.log?.({
         task: this.hooks.latest?.(task.id) ?? task,
@@ -340,19 +344,26 @@ export class Runtime {
     if (!rec) return;
 
     if (msg.kind === 'ready') {
-      task.runtimeReady = true;
       if (msg.ownerMarker && msg.ownerMarker !== rec.ownerMarker) {
         rec.unreworkableReason = 'Runtime identity marker did not match; create a new task';
         this.reportHealth(task, rec, 'unhealthy', 'owner marker mismatch');
         return;
       }
-      rec.identityVerified = Boolean(msg.ownerMarker === rec.ownerMarker);
-      this.persist(task, rec, {
-        workerPid: msg.pid ?? rec.w.pid ?? null,
-        workerStartedAt: msg.startedAt ?? null,
-        identityVerified: rec.identityVerified,
-      });
-      this.hooks.save?.({task});
+      const identityVerified = Boolean(msg.ownerMarker === rec.ownerMarker);
+      // The Worker re-sends `ready` on every openai-chat round. An unchanged
+      // state is not a write.
+      if (task.runtimeReady === true && rec.identityVerified === identityVerified) return;
+      rec.identityVerified = identityVerified;
+      const next = {...task, runtimeReady: true};
+      try {
+        const runtime = this.persist(next, rec, {
+          workerPid: msg.pid ?? rec.w.pid ?? null,
+          workerStartedAt: msg.startedAt ?? null,
+          identityVerified,
+        });
+        if (runtime) next.runtime = runtime;
+      } catch {}
+      this.#commit(next);
       return;
     }
 
@@ -388,8 +399,7 @@ export class Runtime {
       rec.phase = 'running';
       rec.lastHeartbeatAt = Date.now();
       this.reportHealth(task, rec, 'healthy');
-      this.hooks.event?.({task, payload: {kind: 'round_ack', roundId: msg.roundId}});
-      this.hooks.save?.({task});
+      this.#commit(task, {kind: 'round_ack', roundId: msg.roundId});
       return;
     }
 
@@ -405,10 +415,13 @@ export class Runtime {
         this.noteIgnored(task, rec, msg, 'task is not accepting round events');
         return;
       }
-      this.hooks.event?.({task, payload: msg});
       const notification = msg.notification;
-      task.lastEvent = notification.params?.event?.type ?? notification.method;
-      task.eventCount = (task.eventCount ?? 0) + 1;
+      const next = {
+        ...task,
+        lastEvent: notification.params?.event?.type ?? notification.method,
+        eventCount: (task.eventCount ?? 0) + 1,
+      };
+      this.#commit(next, msg);
       return;
     }
 
@@ -459,16 +472,18 @@ export class Runtime {
       rec.rejectedRound = false;
       rec.lastHeartbeatAt = null;
       rec.health = 'idle';
-      released.runtimeHealth = 'idle';
-      this.hooks.event?.({task: released, payload: {kind: 'round_released', roundId: msg.roundId}});
-      this.persist(released, rec);
-      this.hooks.save?.({task: released});
+      const next = {...released, runtimeHealth: 'idle'};
+      try {
+        const runtime = this.persist(next, rec);
+        if (runtime) next.runtime = runtime;
+      } catch {}
+      this.#commit(next, {kind: 'round_released', roundId: msg.roundId});
       // Releasing the gate is what lets a queued rework or Provider fallback
       // dispatch; nothing may start a new round before this point.
       settleRecordRelease(rec, true);
       const fallback = rec.pendingFallback;
       rec.pendingFallback = null;
-      this.hooks.released?.({task: released, rec, fallback});
+      this.hooks.released?.({task: next, rec, fallback});
       return;
     }
   }
@@ -482,8 +497,11 @@ export class Runtime {
     settleRecordRelease(rec, false);
     const task = this.hooks.latest?.(taskId);
     if (!task) return;
-    try { this.persist(task, rec, {exitReason: `Task ${taskId} worker error: ${error.message}`}); } catch {}
-    this.#settle(this.settlement.processError({task, error}));
+    let runtime = null;
+    try { runtime = this.persist(task, rec, {exitReason: `Task ${taskId} worker error: ${error.message}`}); } catch {}
+    const outcome = this.settlement.processError({task, error});
+    if (runtime) outcome.task = {...outcome.task, runtime};
+    this.#settle(outcome);
   }
 
   onProcessExit(taskId, code) {
@@ -497,8 +515,12 @@ export class Runtime {
     // The handle stays until `forget`: a terminal record that failed to save
     // must still find a retryable `stopping` task. `isLive` reports the exit.
     const task = this.hooks.latest?.(taskId);
-    try { if (task) this.persist(task, rec, {exitCode: code}); } catch {}
-    if (task) this.#settle(this.settlement.processExited({task, code}));
+    let runtime = null;
+    try { if (task) runtime = this.persist(task, rec, {exitCode: code}); } catch {}
+    if (!task) return;
+    const outcome = this.settlement.processExited({task, code});
+    if (runtime) outcome.task = {...outcome.task, runtime};
+    this.#settle(outcome);
   }
 
   // --- internals -------------------------------------------------------------
@@ -509,9 +531,22 @@ export class Runtime {
 
   /** Execute the journal and persistence order for a settlement result. */
   #settle(outcome) {
-    if (!outcome?.event) return;
-    try { this.hooks.event?.({task: outcome.task, payload: outcome.event}); } catch {}
-    try { this.hooks.save?.({task: outcome.task}); } catch {}
+    if (outcome?.event) this.#commit(outcome.task, outcome.event);
+  }
+
+  /**
+   * One write for the task record and its event. `commit` is the manager's
+   * single path; the older event/save pair remains only for test doubles.
+   */
+  #commit(task, payload = null) {
+    try {
+      if (typeof this.hooks.commit === 'function') {
+        this.hooks.commit({task, payload});
+        return;
+      }
+      if (payload) this.hooks.event?.({task, payload});
+      this.hooks.save?.({task});
+    } catch {}
   }
 
   persist(task, rec, extra) {
@@ -519,15 +554,13 @@ export class Runtime {
   }
 
   noteIgnored(task, rec, msg, reason) {
-    try {
-      this.hooks.event?.({task, payload: {
-        kind: 'runtime_message_ignored',
-        messageKind: msg?.kind ?? null,
-        messageRoundId: msg?.roundId ?? null,
-        expectedRoundId: rec.roundId,
-        reason,
-      }});
-    } catch {}
+    this.#commit(task, {
+      kind: 'runtime_message_ignored',
+      messageKind: msg?.kind ?? null,
+      messageRoundId: msg?.roundId ?? null,
+      expectedRoundId: rec.roundId,
+      reason,
+    });
   }
 
   clearAckTimer(rec) {

@@ -3,16 +3,32 @@ import path from 'node:path';
 
 const TASK_ID = /^task-[a-f0-9]{12}$/;
 
+/** Records are immutable once indexed, including nested rounds and leases. */
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const item of Array.isArray(value) ? value : Object.values(value)) deepFreeze(item);
+  return Object.freeze(value);
+}
+
 /**
- * Own the in-memory task index and atomic task.json persistence. Callers never
- * write task.json directly; restore is read-only until the manager explicitly
- * saves a migrated record.
+ * Own the in-memory task index, task.json persistence, and the event journal.
+ * Callers never write task.json or events.jsonl directly:
+ *
+ *   * `commit(task, events)` saves the record first, then appends the events
+ *     with the next monotonic sequence numbers. A failed save leaves both the
+ *     file and the index untouched and appends nothing.
+ *   * Every indexed record is deeply frozen. A change is a new record passed
+ *     to `commit`; `peek` can never be edited in place.
+ *   * One sequence counter per task, seeded from the restored record, so a
+ *     restart cannot reuse or reorder a number.
  */
 export class TaskRepository {
-  constructor({runsDir, atomicJson}) {
+  constructor({runsDir, atomicJson, now = () => new Date().toISOString()}) {
     this.runsDir = path.resolve(runsDir);
     this.atomicJson = atomicJson;
+    this.now = now;
     this.records = new Map();
+    this.sequences = new Map();
   }
 
   directory(id) {
@@ -47,17 +63,55 @@ export class TaskRepository {
   }
 
   remember(task) {
-    this.records.set(task.id, task);
+    this.records.set(task.id, deepFreeze(task));
+    if (Number.isSafeInteger(task.eventSequence)) {
+      this.sequences.set(task.id, task.eventSequence);
+    }
     return task;
   }
 
   save(task) {
-    this.atomicJson(path.join(this.directory(task.id), 'task.json'), task);
-    this.records.set(task.id, task);
-    return task;
+    return this.commit(task);
+  }
+
+  /**
+   * The single task write path. The record is persisted before any event so a
+   * failed save can never leave an event that describes an uncommitted state.
+   * Events carry the sequence number and, unless they name one, the active
+   * round. An append failure is rethrown after the record is durable; the
+   * counter has already advanced, so a retry never reuses a number.
+   */
+  commit(task, payloads = []) {
+    if (!task || typeof task.id !== 'string') throw new Error('task record is required');
+    const events = Array.isArray(payloads) ? payloads : [payloads];
+    const base = this.sequences.get(task.id) ?? task.eventSequence ?? 0;
+    const sequence = base + events.length;
+    const next = deepFreeze({
+      ...task,
+      eventSequence: sequence,
+      ...(events.length ? {lastEventSequence: sequence} : {}),
+    });
+    this.atomicJson(path.join(this.directory(task.id), 'task.json'), next);
+    this.records.set(task.id, next);
+    this.sequences.set(task.id, sequence);
+    if (events.length) {
+      const journal = path.join(this.directory(task.id), 'events.jsonl');
+      const roundId = next.rounds?.at(-1)?.roundId;
+      events.forEach((payload, index) => {
+        const record = {
+          at: this.now(),
+          sequence: base + index + 1,
+          ...(roundId && payload?.roundId === undefined ? {roundId} : {}),
+          ...payload,
+        };
+        fs.appendFileSync(journal, `${JSON.stringify(record)}\n`);
+      });
+    }
+    return next;
   }
 
   delete(id) {
+    this.sequences.delete(id);
     return this.records.delete(id);
   }
 
@@ -89,7 +143,8 @@ export class TaskRepository {
       if (!Number.isSafeInteger(task.eventSequence)) {
         task.eventSequence = lastEventSequence(path.join(directory, 'events.jsonl'));
       }
-      this.records.set(name, task);
+      this.records.set(name, deepFreeze(task));
+      this.sequences.set(name, task.eventSequence);
       restored.push(task);
     }
     return restored;

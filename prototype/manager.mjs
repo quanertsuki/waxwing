@@ -114,7 +114,6 @@ export function createManager(options = {}) {
     grantsDir: RUNTIME,
     policySection: task => executionPolicy.reportSection(task),
   });
-  const eventSequences = new Map();
   const taskChanges = new ChangeNotifier();
   const workspaceLeases = new WorkspaceLeaseManager({
     defaultMode: config.workspaceMode ?? 'auto',
@@ -146,11 +145,13 @@ export function createManager(options = {}) {
 
   const directory = id => repository.directory(id);
   const get = id => repository.get(id);
-  const save = task => {
-    const saved = repository.save(task);
+  /** The only task write path: record and events commit together. */
+  const commit = (task, events = []) => {
+    const saved = repository.commit(task, events);
     taskChanges.touch(task.id);
     return saved;
   };
+  const save = task => commit(task);
   function fullView(t) {
     return {...t, live: workers.live(t.id), cleanupAuthorized: acceptance.hasGrant(t.id),
       dataDirectory: directory(t.id), report: path.join(REPORTS, `${t.id}.md`),
@@ -352,9 +353,10 @@ export function createManager(options = {}) {
    */
   function persistFailure(outcome) {
     let persistError = null;
-    try { event(outcome.task, outcome.event); } catch (error) { persistError = error; }
-    if (!persistError) {
-      try { save(outcome.task); } catch (error) { persistError = error; }
+    try {
+      commit(outcome.task, outcome.event ? [outcome.event] : []);
+    } catch (error) {
+      persistError = error;
     }
     if (persistError) {
       try {
@@ -539,30 +541,10 @@ export function createManager(options = {}) {
     const content = acceptance.content(t);
     return taskPageView(t.id, 'report', pageOf(content, offset, limit));
   }
-  function event(t, data) {
-    const persisted = repository.peek(t.id);
-    const previous = eventSequences.get(t.id);
-    const baseline = Number.isSafeInteger(previous)
-      ? previous
-      : persisted?.eventSequence ?? t.eventSequence ?? 0;
-    const sequence = baseline + 1;
-    eventSequences.set(t.id, sequence);
-    t.eventSequence = sequence;
-    const currentRoundId = t.rounds?.at(-1)?.roundId;
-    const record = {
-      at: new Date().toISOString(),
-      sequence,
-      ...(currentRoundId && data.roundId === undefined ? {roundId: currentRoundId} : {}),
-      ...data,
-    };
-    fs.appendFileSync(path.join(directory(t.id), 'events.jsonl'), `${JSON.stringify(record)}\n`);
-    t.lastEventSequence = sequence;
-    return record;
-  }
   function restoreTasks() {
-    for (const t of repository.restore()) {
-      const name = t.id;
-      eventSequences.set(name, t.eventSequence);
+    for (const restored of repository.restore()) {
+      const name = restored.id;
+      let t = restored;
       if (['running', 'stopping'].includes(t.status)) {
         let runtime = t.runtime;
         if (!runtime) {
@@ -573,15 +555,18 @@ export function createManager(options = {}) {
           const outcome = settlement.recover({task: t, runtime, identity: verification});
           if (outcome.decision !== 'not-recoverable') {
             runtime = outcome.runtime;
-            Object.assign(t, outcome.task);
+            t = outcome.task;
             try { atomicJson(path.join(directory(name), 'runtime.json'), runtime); } catch {}
           }
         } else {
-          t.status = 'failed';
-          t.error = 'Manager restarted; the old runtime is no longer reusable, so inspect the workspace and create a new task for follow-up work';
+          t = {
+            ...t,
+            status: 'failed',
+            error: 'Manager restarted; the old runtime is no longer reusable, so inspect the workspace and create a new task for follow-up work',
+          };
         }
       }
-      save(t);
+      commit(t);
       acceptance.restoreGrant(t.id);
     }
     research.restore();
@@ -637,7 +622,6 @@ export function createManager(options = {}) {
       ...extra,
     };
     atomicJson(runtimeFile(t.id), record);
-    t.runtime = record;
     return record;
   }
   /**
@@ -660,9 +644,7 @@ export function createManager(options = {}) {
   const runtime = new Runtime({
     spawn: ({task, ownerMarker}) => forkWorker(task, {ownerMarker}),
     latest: id => repository.peek(id) ?? null,
-    event: ({task, payload}) => event(task, payload),
-    save: ({task}) => save(task),
-    transition: ({task, action}) => transition(task, action),
+    commit: ({task, payload}) => commit(task, payload ? [payload] : []),
     persist: ({task, rec, extra}) => persistRuntimeRecord(task, rec, extra),
     log: ({task, rec, chunk}) => {
       if (rec.logBytes > 1024 * 1024) return;
@@ -694,7 +676,8 @@ export function createManager(options = {}) {
     runtime,
     repository,
     save,
-    event: (task, payload) => event(task, payload),
+    event: (task, payload) => commit(task, [payload]),
+    commit: (task, events) => commit(task, events),
     workspace: workspaceLeases,
     acceptance,
     gracefulExitTimeoutMs: DEFAULT_EXIT_TIMEOUT_MS,
@@ -719,30 +702,26 @@ export function createManager(options = {}) {
     try {
       fallback = settlement.firstRoundFailure(task, message, config.fallbackProvider);
     } catch (error) {
-      event(task, {kind: 'provider_fallback_failed', error: error.message});
+      commit(task, [{kind: 'provider_fallback_failed', error: error.message}]);
     }
     if (fallback) {
-      event(fallback.task, fallback.event);
-      save(fallback.task);
+      commit(fallback.task, [fallback.event]);
       runtime.deferFallback(fallback.fallback.taskId, fallback.fallback);
       return;
     }
     const outcome = settlement.terminal({task, message});
-    event(outcome.task, outcome.event);
-    save(outcome.task);
+    commit(outcome.task, [outcome.event]);
   }
   /** A release without a result or error is a protocol violation, not a success. */
   function settleMissingTerminal(task, rec, message) {
     const outcome = settlement.missingTerminal({task, message});
-    event(outcome.task, outcome.event);
-    save(outcome.task);
+    commit(outcome.task, [outcome.event]);
   }
   /** A busy worker means its previous round never released; fail explicitly. */
   function settleWorkerBusy(task, rec, message) {
     const outcome = settlement.workerBusy({task, message});
-    event(outcome.task, outcome.event);
-    runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
-    save(outcome.task);
+    const saved = commit(outcome.task, [outcome.event]);
+    runtime.reportHealth(saved, rec, outcome.health.health, outcome.health.detail);
   }
   /** Deferred Provider fallback starts only after the failed round released. */
   function handoffReleased(fallback) {
@@ -763,9 +742,8 @@ export function createManager(options = {}) {
   /** An unacknowledged round is untrusted, but its process is deliberately kept. */
   function settleAckTimeout(task, rec, roundId, timeoutMs) {
     const outcome = settlement.ackTimeout({task, roundId, timeoutMs});
-    runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
-    event(outcome.task, outcome.event);
-    try { save(outcome.task); } catch {}
+    const saved = commit(outcome.task, [outcome.event]);
+    runtime.reportHealth(saved, rec, outcome.health.health, outcome.health.detail);
   }
   /** A round deadline requests a stop; a failed stop must not look like a timeout. */
   function stopAfterRoundTimeout(rec, timeoutMs) {
@@ -789,7 +767,7 @@ export function createManager(options = {}) {
    * heartbeat, and round timers, and the release gate. This function owns the
    * task record, the grant revocations, and the startup-failure bookkeeping.
    */
-  async function executeRun(t, userPrompt, maxTokens, effort = null) {
+  async function executeRun(t, userPrompt, maxTokens, effort = null, runOptions = {}) {
     // The policy is read at round start; the recorded prompt stays the raw user
     // instruction and each round keeps the version/hash actually applied.
     const policy = executionPolicy.round();
@@ -799,6 +777,8 @@ export function createManager(options = {}) {
       maxTokens,
       effort,
       policy,
+      configure: runOptions.configure,
+      events: runOptions.events,
     });
     const {task: next, roundId} = prepared;
     try {
@@ -929,19 +909,25 @@ export function createManager(options = {}) {
           usageDecision: {...inputs, decision: decision.decision},
           validated,
         });
-        usageModule.applyRework(t, decision);
-        if (decision.event) {
-          const payload = {...decision.event};
-          delete payload.overrideAt;
-          event(t, payload);
-        }
-        return executeRun(t, command.prompt, command.maxTokens, command.effort);
+        // The override reaches the record only inside prepareRun's commit:
+        // a failed gate leaves both the task and the event journal unchanged.
+        const reworked = usageModule.applyRework(t, decision);
+        const payload = decision.event ? {...decision.event} : null;
+        if (payload) delete payload.overrideAt;
+        return executeRun(t, command.prompt, command.maxTokens, command.effort, {
+          configure: value => {
+            if (reworked.usageLimits) value.usageLimits = reworked.usageLimits;
+            if (reworked.lastLimitOverride) value.lastLimitOverride = reworked.lastLimitOverride;
+          },
+          events: payload ? [payload] : [],
+        });
       }
       case 'cleanup_worktree': {
         const t = get(a.id);
-        const result = workspaceLeases.release({task: t, live: workers.live(t.id)});
-        event(t, {kind: 'worktree_cleaned', ...result});
-        save(t);
+        const {lease, ...result} = workspaceLeases.release({task: t, live: workers.live(t.id)});
+        commit({...t, workspaceLease: lease ?? t.workspaceLease}, [
+          {kind: 'worktree_cleaned', ...result},
+        ]);
         return {id: t.id, ...result};
       }
       case 'cancel': return stop(a.id, false);
@@ -954,8 +940,8 @@ export function createManager(options = {}) {
           evidence: a.evidence,
           save,
         });
-        event(accepted, {kind: 'accepted', evidence: a.evidence});
-        return statusSummary(accepted);
+        const saved = commit(accepted, [{kind: 'accepted', evidence: a.evidence}]);
+        return statusSummary(saved);
       }
       case 'export': {
         const t = get(a.id);
@@ -983,7 +969,6 @@ export function createManager(options = {}) {
           live: workers.live(t.id),
           forget: id => {
             repository.delete(id);
-            eventSequences.delete(id);
           },
         });
       }

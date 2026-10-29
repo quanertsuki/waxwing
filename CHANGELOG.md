@@ -20,6 +20,13 @@ and uses semantic versioning for public releases.
 - Task status views and research reports share one paging rule: an offset past
   the end clamps to an empty final page, an offset inside a surrogate pair is
   rejected, and every page reports `complete`
+- Every task write now goes through `TaskRepository.commit`: the record is
+  saved before its event is appended with the next monotonic sequence, indexed
+  records are deeply frozen, and a failed save appends nothing. Runtime health,
+  readiness, round progress, and release updates commit a new record instead of
+  editing the index; a rework override is applied only inside `prepareRun`'s
+  commit, a repeated `ready` message no longer writes, and worktree cleanup
+  returns the updated lease instead of mutating it
 - `RuntimeSettlement` is the one projection from a runtime fact (terminal
   message, startup/fallback/stop failure, ACK timeout, process error or exit,
   close, restart identity) to the task status, event, lease conclusion, and

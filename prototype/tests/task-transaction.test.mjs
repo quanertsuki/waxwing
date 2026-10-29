@@ -149,8 +149,11 @@ test('a failed atomic write never publishes a task into the repository index', (
     assert.deepEqual(repository.ids(), []);
 
     fail = false;
-    repository.save(task);
-    assert.equal(repository.get(task.id), task);
+    const saved = repository.save(task);
+    assert.notEqual(saved, task, 'commit stores an immutable snapshot');
+    assert.equal(saved.eventSequence, 0);
+    assert.equal(Object.isFrozen(saved), true);
+    assert.equal(repository.get(task.id), saved);
     assert.deepEqual(repository.ids(), [task.id]);
   } finally {
     fs.rmSync(root, {recursive: true, force: true});
@@ -548,8 +551,8 @@ test('prepareRun refuses a running task and an un-released previous runtime with
     );
     assert.equal(saved, 0);
 
-    running.status = 'awaiting_review';
-    runtime.records.set(running.id, {phase: 'finished', w: {}});
+    const review = repository.remember({...running, status: 'awaiting_review'});
+    runtime.records.set(review.id, {phase: 'finished', w: {}});
     runtime.waitForRelease = async () => false;
     await assert.rejects(
       () => transaction.prepareRun(running.id, {prompt: 'next', maxTokens: 1024}),

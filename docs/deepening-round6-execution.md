@@ -130,3 +130,17 @@
 - 完整测试：`288/288` 通过，41 个测试文件。
 - 发布树：`258` 个文件通过（`close-outcome.mjs` 删除，新增 `settlement.mjs`；三个旧测试文件合并为一个）。
 - 遗留：`firstRoundFailure` 把任务失败与 fallback 决策放在同一个投影里，仍有 `fallback` 字段；#9 之后如需进一步拆分再处理。
+
+#### #7 任务写入只有一条路径
+
+状态：完成。
+
+- `src/tasks/repository.mjs`：新增 `commit(task, events)`，顺序固定为“先原子保存 `task.json`，再按序号追加 `events.jsonl`”。保存失败不改索引、不追加事件；追加失败时记录已保存，错误抛出且序号已前进。每个任务一个序号计数器，`restore` 时从记录播种。索引里的记录（含 rounds、workspaceLease）深度冻结，`peek` 不能再被就地修改；`save` 成为 `commit(task, [])`。
+- `prototype/manager.mjs`：删除独立的 `eventSequences` 和 `event()`，所有任务写入走一个 `commit`；失败投影、终态、`worker_busy`、ACK 超时、清理、accept、fallback 都一次提交。`restoreTasks` 改为提交恢复后的新记录；`cleanup_worktree` 提交新的 lease。
+- `src/runtime/module.mjs`：健康、就绪、worker 事件、release、进程错误/退出改为提交新记录；新增 `commit` hook，旧的 `event`+`save` 只留给测试替身；重复的 `ready` 不再写盘。
+- `src/tasks/transaction.mjs`：`prepareRun` 支持 `events` 和 `commit`，rework 的限额覆盖与 `round_started` 在同一次提交里写入；轮次数组改为复制后追加。`src/usage/module.mjs` 的 `applyRework` 改为返回新记录。
+- `src/workspace/lease-manager.mjs`：`cleanup` 返回新的 lease，不再就地改 `lease.status`。
+- 目标测试：新增 `task-repository-commit.test.mjs` 5 项（深层冻结、保存失败无事件且索引不变、追加失败后记录已存且下一序号继续、重启序号不回退、一次提交多个事件按序且带 roundId）；`runtime-module.test.mjs` 新增重复 `ready` 不写盘 1 项；冻结开启下完整套件无就地修改。
+- 完整测试：`294/294` 通过，42 个测试文件。
+- 发布树：`259` 个文件通过。
+- 遗留：追加失败后 `task.json` 的序号会比日志领先一个（记录已落盘、事件缺失），这是“先保存后追加”的已知方向；错误会抛出，下一次提交不会复用序号。

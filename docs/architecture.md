@@ -15,9 +15,9 @@ interface.
 | `src/storage/durable-file.mjs` | Atomic text/JSON writes with transient-rename retry, replace-with-backup transactions, and the shared SHA-256 |
 | `src/adapters/cli.mjs` | CLI adapter; forwards no task-state mutations itself |
 | `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases |
-| `src/tasks/repository.mjs` | Task index, record validation, atomic `task.json` persistence |
+| `src/tasks/repository.mjs` | Task index, deeply frozen records, atomic `task.json`, and the single commit path: save the record, then append events with the next monotonic sequence |
 | `src/tasks/lifecycle.mjs` | Legal task-status transitions |
-| `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation |
+| `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation, and the round-start record+event commit |
 | `src/tasks/command.mjs` | Create/rework command validation order and transaction inputs |
 | `src/tasks/view.mjs` | Stable bounded list/summary/detail/page contract shared by CLI, MCP, Rust, and Vue |
 | `src/view/page.mjs` | One paging rule: bounds, surrogate-pair safety, `nextOffset`, `complete` |

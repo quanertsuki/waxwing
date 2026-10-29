@@ -174,16 +174,18 @@ export class UsageModule {
   }
 
   /** Apply the event projection from decideRework after all checks succeeded. */
+  /** Return the next record with the override applied; never edits its input. */
   applyRework(task, result) {
     if (!result) return task;
+    const next = {...task};
     if (result.event) {
-      task.lastLimitOverride = {
+      next.lastLimitOverride = {
         at: result.event.overrideAt,
         reason: boundedReason(result.override.reason),
       };
     }
-    if (result.requestedLimits) task.usageLimits = result.requestedLimits;
-    return task;
+    if (result.requestedLimits) next.usageLimits = result.requestedLimits;
+    return next;
   }
 }
 
