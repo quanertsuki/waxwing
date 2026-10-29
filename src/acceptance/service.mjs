@@ -396,17 +396,4 @@ export class AcceptanceService {
     this.forgetGrant(task.id);
     return {...task, acceptance: null, reportHash: null};
   }
-
-  /**
-   * Acceptance-side rework preconditions. The manager adds its own runtime,
-   * round, workspace, and shutdown reasons around this list.
-   */
-  reworkRefusal(task, {closing = false} = {}) {
-    if (task?.status === 'closed') return 'Task is closed; create a new task for follow-up work';
-    if (task?.status === 'accepted') return 'Task is accepted; create a new task for follow-up work';
-    if (task?.status === 'running') return 'Task is running; wait for the round to finish or cancel it';
-    if (closing) return 'Task is stopping; runtime is closing; wait for exit confirmation';
-    if (task?.status === 'stopping') return 'Task is stopping; wait for runtime exit confirmation';
-    return null;
-  }
 }

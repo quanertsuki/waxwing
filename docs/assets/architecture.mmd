@@ -12,13 +12,14 @@ flowchart LR
 
   subgraph Manager["Local manager: single state owner"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
-    TaskCmd["TaskCommand<br/>create/rework/preflight"]
+    TaskCmd["TaskCommand<br/>create validation"]
+    Rework["TaskRework<br/>eligibility + limits + override"]
     Settlement["RuntimeSettlement<br/>terminal/failure/close/recovery"]
     Runtime["Runtime<br/>round IDs + heartbeat + gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
     Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
     Research["ResearchBatchService + ResearchState<br/>parallel scratch shards + report"]
-    Usage["UsageModule<br/>indexing, limits, override, rework"]
+    Usage["UsageModule<br/>indexing, limits, override"]
     TaskView["TaskView<br/>bounded read contract"]
     Providers["ProviderRegistry<br/>DSH SDK + OpenAI-compatible"]
   end
@@ -43,12 +44,16 @@ flowchart LR
   Desktop --> Gateway
 
   Gateway --> TaskCmd
+  Gateway --> Rework
   Gateway --> TaskView
   Gateway --> Tasks
   Gateway --> Acceptance
   Gateway --> Research
   Gateway --> Usage
   TaskCmd --> Tasks
+  Rework --> Usage
+  Rework --> Runtime
+  Rework --> Lease
   Tasks <--> Settlement
   Tasks <--> Runtime
   Runtime --> Settlement

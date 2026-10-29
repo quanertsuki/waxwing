@@ -35,6 +35,14 @@ and uses semantic versioning for public releases.
   repeated failure only updates `error` and records its event.
   `RuntimeSupervisor`, `RuntimeLifecycle`, and `RuntimeOutcomeSettlement` remain
   as deprecated facades until 0.3.0; `close-outcome.mjs` is removed
+- Rework eligibility, next-round limits, and the one-round override are one
+  read-only `TaskRework` decision shared by the rework action and status
+  summaries. Lifecycle, runtime, round, and workspace refusals are answered
+  once per request; the record patch and override event are applied only by
+  `prepareRun`'s commit, so a failed gate leaves the task and journal
+  unchanged. `TaskCommandModule` now validates create only and no longer
+  exposes `validateRework`/`rework`; the lifecycle status rules moved out of
+  `AcceptanceService` as well
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and

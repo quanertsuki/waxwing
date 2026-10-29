@@ -9,8 +9,8 @@ import {once} from 'node:events';
 import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnvironment,
   canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath} from './common.mjs';
 import {transition} from '../src/tasks/lifecycle.mjs';
-import {budgetFileFor, parseOptionalMaxTokens, resolveRoundBudget} from './budget.mjs';
-import {DEFAULT_EFFORT, parseOptionalEffort, resolveRoundEffort} from './effort.mjs';
+import {budgetFileFor, resolveRoundBudget} from './budget.mjs';
+import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
 import {effectiveLimits} from '../src/usage/policy.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
 import {ExecutionPolicy} from '../src/usage/execution-policy.mjs';
@@ -33,6 +33,7 @@ import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/ident
 import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
 import {TaskCommandModule} from '../src/tasks/command.mjs';
+import {TaskRework} from '../src/tasks/rework.mjs';
 
 const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/');
 
@@ -194,51 +195,37 @@ export function createManager(options = {}) {
     });
   }
   /**
-   * Original rework refusals, checked before the cumulative usage limit. An
-   * override can bypass only the limit, never these conditions.
+   * One read-only decision for both the rework action and status summaries.
+   * Runtime facts are read through this closure, so a retained handle's
+   * unreworkable reason and the closing flag stay next to the handle itself.
    */
-  function baseReworkBlockedReason(t) {
-    if (shuttingDown) return 'Manager is shutting down; rework is refused';
-    const rec = workers.get(t.id);
-    const live = workers.live(t.id);
-    // closed / accepted / running / stopping preconditions are the Acceptance
-    // module's policy; runtime, round, and workspace reasons stay here.
-    const acceptanceRefusal = acceptance.reworkRefusal(t, {closing: Boolean(rec?.closing)});
-    if (acceptanceRefusal) return acceptanceRefusal;
-    // A retained handle's recorded reason (broken IPC, protocol error, ACK
-    // timeout) is more actionable than the generic "runtime is gone".
-    if (rec?.unreworkableReason) return rec.unreworkableReason;
-    if (t.rounds.length >= config.maxRounds) return `Maximum ${config.maxRounds} rounds reached; create a new task for further work`;
-    if (!live && t.rounds.length > 0) {
-      return `Original runtime is gone; this DSH cannot resume sessionId ${t.sessionId} in a new runtime; create a new task for follow-up work`;
-    }
-    const conflict = workspaceConflict(t.workspace, t.id);
-    if (conflict) return `Workspace overlaps another task (${conflict.id}) with a live runtime; close it before reworking`;
-    return null;
-  }
-  /** Original refusals first; a blocked cumulative limit is the last reason. */
-  function reworkBlockedReason(t, usage = null) {
-    const base = baseReworkBlockedReason(t);
-    if (base) return base;
-    if (usage?.limitState === 'blocked') return usageModule.blockedReason(usage);
-    return null;
-  }
+  const rework = new TaskRework({
+    usage: usageModule,
+    maxRounds: () => config.maxRounds,
+    isShuttingDown: () => shuttingDown,
+    runtimeFacts: t => {
+      const rec = workers.get(t.id);
+      return {
+        closing: Boolean(rec?.closing),
+        live: workers.live(t.id),
+        unreworkableReason: rec?.unreworkableReason ?? null,
+      };
+    },
+    workspaceConflict,
+    directory: id => directory(id),
+    providerSupportsEffort: supportsEffort,
+    resolveBudget: resolveRoundBudget,
+    resolveEffort: resolveRoundEffort,
+    defaultEffort: () => config.defaultEffort ?? DEFAULT_EFFORT,
+  });
   /** Never throws; an unavailable usage source becomes an unavailable limit state. */
   function usageSnapshot(t, options = {}) {
     return usageModule.snapshot(t, directory(t.id), options);
   }
   const commandModule = new TaskCommandModule({
     limitsForRequest: (task, value) => usageModule.limitsForRequest(task, value),
-    parseBudget: parseOptionalMaxTokens,
-    parseEffort: parseOptionalEffort,
-    providerSupportsEffort: supportsEffort,
-    resolveBudget: resolveRoundBudget,
-    resolveEffort: resolveRoundEffort,
-    defaultEffort: () => config.defaultEffort ?? DEFAULT_EFFORT,
-    baseBlocked: task => baseReworkBlockedReason(task),
     canStart: () => shuttingDown ? 'Manager is shutting down' : null,
     preflight: ({request, taskId, validated}) => preflightCreate(request, taskId, validated),
-    now: () => new Date().toISOString(),
   });
   /** Resolve and validate a workspace before any task directory is created. */
   function resolveWorkspace(value) {
@@ -426,7 +413,7 @@ export function createManager(options = {}) {
     if (last?.policy?.warning) {
       statusUsage.warnings = [...new Set([...(statusUsage.warnings ?? []), last.policy.warning])];
     }
-    const reworkBlocked = reworkBlockedReason(t, statusUsage);
+    const reworkBlocked = rework.blockedReason(t, statusUsage);
     const summary = taskSummaryView(t, {
       listView: base,
       usageRounds: snapshot.usageRounds,
@@ -899,27 +886,14 @@ export function createManager(options = {}) {
       case 'create': return createTask(a);
       case 'rework': {
         const t = get(a.id);
-        const inputs = usageModule.reworkInputs(t, a);
-        const validated = commandModule.validateRework(t, a, {usageDecision: inputs});
-        const decision = usageModule.decideRework(t, directory(t.id), a, {
-          inputs,
-          baseBlockedReason: () => baseReworkBlockedReason(t),
-        });
-        const command = commandModule.rework(t, a, {
-          usageDecision: {...inputs, decision: decision.decision},
-          validated,
-        });
-        // The override reaches the record only inside prepareRun's commit:
-        // a failed gate leaves both the task and the event journal unchanged.
-        const reworked = usageModule.applyRework(t, decision);
-        const payload = decision.event ? {...decision.event} : null;
-        if (payload) delete payload.overrideAt;
-        return executeRun(t, command.prompt, command.maxTokens, command.effort, {
-          configure: value => {
-            if (reworked.usageLimits) value.usageLimits = reworked.usageLimits;
-            if (reworked.lastLimitOverride) value.lastLimitOverride = reworked.lastLimitOverride;
-          },
-          events: payload ? [payload] : [],
+        // One read-only decision supplies the prompt, limits, and override
+        // event. The record change is applied only inside prepareRun's commit,
+        // so a gate failure leaves both task.json and events.jsonl unchanged.
+        const decision = rework.decide(t, a);
+        if (!decision.allowed) throw new Error(decision.reason);
+        return executeRun(t, decision.prompt, decision.maxTokens, decision.effort, {
+          configure: value => Object.assign(value, decision.record),
+          events: decision.event ? [decision.event] : [],
         });
       }
       case 'cleanup_worktree': {

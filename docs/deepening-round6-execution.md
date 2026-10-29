@@ -144,3 +144,16 @@
 - 完整测试：`294/294` 通过，42 个测试文件。
 - 发布树：`259` 个文件通过。
 - 遗留：追加失败后 `task.json` 的序号会比日志领先一个（记录已落盘、事件缺失），这是“先保存后追加”的已知方向；错误会抛出，下一次提交不会复用序号。
+
+#### #8 Rework 决策收进一个 Module
+
+状态：完成。
+
+- 新增 `src/tasks/rework.mjs`：`TaskRework.decide` 一次回答“能否 rework、下一轮限额/effort、覆盖记录与事件”，返回决策和记录补丁，不修改任务；`blockedReason` 供 `statusSummary` 使用，拒绝原因与操作共用同一套状态、运行时、轮次、工作区、限额规则。
+- `reworkStatusRefusal` 从 `AcceptanceService` 移到 rework 模块；`src/tasks/command.mjs` 只保留 create 校验，删除 `validateRework`/`rework` 和未使用的默认实现，`parseBudget`/`parseEffort` 改为直接使用 `budget.mjs`/`effort.mjs` 的唯一实现。
+- `src/usage/module.mjs`：`decideRework` 新增 `throwOnRefusal`，可返回被拒绝的决策；覆盖事件不再临时改名 `overrideAt`，改为决策结果上的独立 `overrideAt` 字段，事件载荷不带时间戳，由仓库统一写入。
+- `prototype/manager.mjs`：删除 `baseReworkBlockedReason`/`reworkBlockedReason` 和七步 rework 序列，rework 操作只调用一次 `rework.decide`；记录补丁与覆盖事件只在 `prepareRun` 的提交里生效。
+- 目标测试：新增 `rework-module.test.mjs` 21 项——状态 × 运行时 × 限额表（允许、运行中、停止中、关闭中、已关闭、已接受、运行时缺失、不可信句柄、轮次上限、工作区冲突、关停、警告、阻断、覆盖）；`statusSummary` 与 rework 操作拒绝文本一致（模块级限额 + 真实 manager 关闭态）；`prepareRun` 门禁失败后 `task.json` 与 `events.jsonl` 不变。`task-command-module.test.mjs` 改为经真实 `createManager` 验证 create 路径。
+- 完整测试：`311/311` 通过，43 个测试文件。
+- 发布树：`261` 个文件通过。
+- 遗留：`TaskCommandModule` 是 `src/app.mjs` 的公开导出，删除其 rework 方法属于公开类的方法级变更，已在 CHANGELOG 记录；如需保留旧方法，需在 0.3.0 前加弃用转发。

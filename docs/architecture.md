@@ -18,7 +18,8 @@ interface.
 | `src/tasks/repository.mjs` | Task index, deeply frozen records, atomic `task.json`, and the single commit path: save the record, then append events with the next monotonic sequence |
 | `src/tasks/lifecycle.mjs` | Legal task-status transitions |
 | `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation, and the round-start record+event commit |
-| `src/tasks/command.mjs` | Create/rework command validation order and transaction inputs |
+| `src/tasks/command.mjs` | Create command validation order and the immutable inputs the create transaction consumes |
+| `src/tasks/rework.mjs` | One read-only rework decision: status/runtime/workspace/limit refusals, next-round limits, override record and event; shared by the rework action and status summary |
 | `src/tasks/view.mjs` | Stable bounded list/summary/detail/page contract shared by CLI, MCP, Rust, and Vue |
 | `src/view/page.mjs` | One paging rule: bounds, surrogate-pair safety, `nextOffset`, `complete` |
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
@@ -30,7 +31,6 @@ interface.
 | `src/runtime/outcome.mjs` | Deprecated alias of `RuntimeSettlement`; removal at 0.3.0 |
 | `src/runtime/supervisor.mjs` | Deprecated facade over the Runtime release/exit gates; removal at 0.3.0 |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
-| `src/tasks/command.mjs` | Create/rework/preflight validation order and transaction inputs |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants; owns the report+record commit and the policy appendix |
 | `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification |
 | `src/research/repository.mjs` | Batch storage, atomic `batch.json`, and crash-window orphan reconciliation |
@@ -39,7 +39,7 @@ interface.
 | `src/research/service.mjs` | Compatibility facade: parallel shards, scratch workspaces, serialized refresh, partial results |
 | `src/usage/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
-| `src/usage/module.mjs` | One usage seam: indexing, pricing, limits, override, and rework policy |
+| `src/usage/module.mjs` | One usage seam: indexing, pricing, limit inheritance, threshold evaluation, and the one-round override decision |
 | `src/usage/service.mjs` | Deprecated compatibility adapter; production callers use `UsageModule` |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
 | `src/providers/adapter-cache.mjs` | One adapter per Provider identity inside a Worker process |

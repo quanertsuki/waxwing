@@ -132,6 +132,7 @@ export class UsageModule {
     baseBlockedReason = null,
     validate = null,
     inputs = null,
+    throwOnRefusal = true,
   } = {}) {
     const values = inputs ?? this.reworkInputs(task, request);
     const {currentLimits, requestedLimits, override} = values;
@@ -145,20 +146,23 @@ export class UsageModule {
     const snapshot = this.snapshot(task, taskDirectory, {persist: false});
     const usage = snapshot.statusUsage;
     const decision = decideRework({baseBlockedReason: blockedReason, usage, override});
-    if (!decision.allowed) throw new Error(decision.reason);
+    if (!decision.allowed && throwOnRefusal) throw new Error(decision.reason);
     const afterLimits = requestedLimits ?? currentLimits;
     let event = null;
+    let overrideAt = null;
     if (decision.overridden) {
-      const at = this.now();
-      event = overrideEvent({
-        at,
+      overrideAt = this.now();
+      const template = overrideEvent({
+        at: overrideAt,
         reason: override.reason,
         usage,
         before: currentLimits,
         after: afterLimits,
       });
-      delete event.at;
-      event.overrideAt = at;
+      // The journal stamp is the repository's responsibility; the payload is
+      // the operator-facing record of why this round passed the limit.
+      const {at: _journalStamp, ...payload} = template;
+      event = payload;
     }
     const result = {
       currentLimits,
@@ -168,19 +172,19 @@ export class UsageModule {
       usage,
       snapshot,
       decision,
+      overrideAt,
       event,
     };
     return result;
   }
 
-  /** Apply the event projection from decideRework after all checks succeeded. */
   /** Return the next record with the override applied; never edits its input. */
   applyRework(task, result) {
     if (!result) return task;
     const next = {...task};
-    if (result.event) {
+    if (result.overrideAt) {
       next.lastLimitOverride = {
-        at: result.event.overrideAt,
+        at: result.overrideAt,
         reason: boundedReason(result.override.reason),
       };
     }
