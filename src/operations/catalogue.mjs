@@ -81,6 +81,11 @@ const researchShards = field({
   minItems: 1,
   items: researchShard,
 });
+// Provider contents are validated by the provider registry, which knows every
+// adapter option; the catalogue only checks the argument shape.
+const providerConfig = field({type: 'object'}, value => {
+  if (!plainObject(value)) throw new OperationError('config must be an object');
+});
 
 const IDS = {fields: {id}, required: ['id']};
 
@@ -199,6 +204,62 @@ export const OPERATIONS = [
     required: ['id'],
     cli: {style: 'id', command: 'research-cancel'},
     destructive: true,
+  }),
+  operation('config_info', {
+    description: 'Read the resolved data, research, provider, and configuration paths plus the launcher defaults.',
+    server: true,
+    desktop: true,
+    mcp: false,
+    readOnly: true,
+  }),
+  operation('providers_list', {
+    description: 'List every provider file the manager can load, with invalid files reported separately.',
+    server: true,
+    desktop: true,
+    mcp: false,
+    readOnly: true,
+  }),
+  operation('provider_validate', {
+    description: 'Validate one provider configuration with the same rules task creation uses.',
+    fields: {config: providerConfig},
+    required: ['config'],
+    server: true,
+    desktop: true,
+    mcp: false,
+    readOnly: true,
+  }),
+  operation('provider_save', {
+    description: 'Validate and save one provider file. Known fields are replaced; unknown fields are preserved.',
+    fields: {config: providerConfig},
+    required: ['config'],
+    server: true,
+    desktop: true,
+    mcp: false,
+  }),
+  operation('provider_delete', {
+    description: 'Delete the provider file that declares this provider name.',
+    fields: {name: text},
+    required: ['name'],
+    server: true,
+    desktop: true,
+    mcp: false,
+    destructive: true,
+  }),
+  operation('settings_get', {
+    description: 'Read the editable settings: default and fallback provider plus usage limits.',
+    server: true,
+    desktop: true,
+    mcp: false,
+    readOnly: true,
+  }),
+  operation('settings_save', {
+    description: 'Validate and save the editable settings; the running manager applies them immediately.',
+    fields: {defaultProvider: text, fallbackProvider: text, usageLimits},
+    required: ['defaultProvider', 'fallbackProvider', 'usageLimits'],
+    order: ['defaultProvider', 'fallbackProvider', 'usageLimits'],
+    server: true,
+    desktop: true,
+    mcp: false,
   }),
   operation('create', {
     description: "Create a real task after planning. workspaceMode=auto uses an isolated Git worktree for a clean repository, shared locks for a non-Git directory, and refuses a dirty Git repository. Returns a bounded summary. Optional maxTokens sets this task's output budget. Optional effort high|max sets reasoning effort. Request and cost limits are disabled by default.",

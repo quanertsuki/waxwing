@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod manager;
 mod paths;
 mod providers;
 mod settings;
@@ -23,6 +24,7 @@ fn main() {
             tasks::is_manager_running,
             tasks::start_manager,
             providers::get_providers,
+            providers::validate_provider,
             providers::save_provider,
             providers::delete_provider,
             settings::get_settings,

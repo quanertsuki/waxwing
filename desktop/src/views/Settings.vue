@@ -5,7 +5,9 @@
         <div v-if="loading" class="loading">加载中...</div>
         <div v-else-if="error" class="error">{{ error }}</div>
 
-        <div v-else class="settings-form">
+        <div v-if="notice" class="notice">{{ notice }}</div>
+
+        <div v-if="!loading && !error" class="settings-form">
             <section>
                 <h3>默认服务商</h3>
                 <select v-model="settings.defaultProvider">
@@ -59,24 +61,8 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
-
-interface Provider {
-    name: string;
-    type: string;
-}
-
-interface Settings {
-    defaultProvider: string;
-    fallbackProvider: string;
-    usageLimits: {
-        enabled: boolean;
-        warnCostCny: number;
-        blockCostCny: number;
-        warnRequests: number;
-        blockRequests: number;
-    };
-}
+import { api } from '../api';
+import type { Provider, Settings } from '../api';
 
 const settings = ref<Settings>({
     defaultProvider: '',
@@ -97,16 +83,14 @@ const providerNames = computed(() => {
 });
 const loading = ref(true);
 const error = ref('');
+const notice = ref('');
 
 async function loadSettings() {
     loading.value = true;
     try {
-        const [s, p] = await Promise.all([
-            invoke<Settings>('get_settings'),
-            invoke<Provider[]>('get_providers')
-        ]);
+        const [s, p] = await Promise.all([api.settings(), api.providers()]);
         settings.value = s;
-        providers.value = p;
+        providers.value = p.providers;
     } catch (e) {
         error.value = String(e);
     } finally {
@@ -116,10 +100,14 @@ async function loadSettings() {
 
 async function saveSettings() {
     try {
-        await invoke('save_settings', { settings: settings.value });
+        const result = await api.saveSettings(settings.value);
+        settings.value = result.settings;
         error.value = '';
-        alert('保存成功');
+        notice.value = result.restartRequired
+            ? '已保存；重启 Waxwing 后生效'
+            : '已保存，运行中的 manager 已应用新设置';
     } catch (e) {
+        notice.value = '';
         error.value = String(e);
     }
 }
@@ -234,5 +222,16 @@ select:focus, input:focus {
 
 .error {
     color: #e91e63;
+}
+
+.notice {
+    max-width: 520px;
+    margin-bottom: 16px;
+    padding: 12px 18px;
+    border: 1px solid #cfe8d5;
+    border-radius: 12px;
+    background: #f2fbf4;
+    color: #2e7d4f;
+    font-size: 13px;
 }
 </style>

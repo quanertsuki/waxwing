@@ -235,3 +235,22 @@
 - 完整测试：`348/348` 通过，48 个测试文件。
 - 发布树：`274` 个文件通过。
 - 遗留：research service 仍自行构造 repository/capture/report，装配函数未与 manager 分离；属 #15 的 manager 装配范围。
+
+#### #14 Desktop 通过 Manager 读写配置
+
+状态：完成。
+
+- 新增 `src/config/paths.mjs`：`managerPaths({here, env})` 一次给出数据根、runs/reports/runtime/research/providers 目录、后端与本地配置文件、Node、端口、manager 脚本与服务 URL；`prototype/config.mjs` 导出 `platformDataRoot`。
+- `prototype/cli.mjs`：新增 `paths` 子命令，在 `ensureServer()` 之前处理并以 JSON 输出；帮助文本附一行说明。
+- 新增 `src/config/service.mjs`：`ConfigurationService` 独占 provider 文件与可编辑设置的解析、校验和写入。`providers()` 同时返回无效文件，`saveProvider` 按名字更新声明该名字的文件（保留 `apiKey` 等未知字段，新名字写 `<name>.json`，拒绝路径分隔符），`deleteProvider` 只删对应文件；`settings()` 合并默认限额，`saveSettings` 校验 provider 引用、把旧版 `prototype/config.local.json` 迁到 `platformDataRoot` 并把相对路径转绝对；`DEFAULT_LIMITS` 与 `absolutizeLocalPaths` 导出。
+- `src/operations/catalogue.mjs`：新增 `config_info`、`providers_list`、`provider_validate`、`provider_save`、`provider_delete`、`settings_get`、`settings_save`，只对 server/desktop 入口开放；`provider_save` 要求 `config` 为对象，`settings_save` 三个字段必填；`provider_delete` 标为 destructive。
+- `prototype/manager.mjs`：构造 `ConfigurationService`（可注入），把七个操作接到它；启动时把 `config.usageLimits` 规范成对象，并注明 `UsageModule` 持有构造时的那份限额。`settings_save` 返回 `{saved, restartRequired: true, localConfigPath, settings}`，不再在进程内改全局配置。
+- `prototype/common.mjs` 导出 `LOCAL_CONFIG_SOURCE`。
+- Rust：`paths.rs` 只保留后端根、Node 命令与 `ManagerPaths`，通过 `node cli.mjs paths` 解析并缓存一次，删除所有 config/providers/settings 文件解析；新增 `manager.rs` 统一请求与健康检查；`settings.rs`、`providers.rs` 改为转发 manager 操作，`tasks.rs` 的 token/请求/健康检查改用 `manager`。`manager_script` 死字段删除。
+- 桌面契约：`scripts/generate-task-contract.mjs` 导出 `renderContractTypes` 与 `CONTRACT_TYPES_PATH`，从任务视图 fixture 推出 `desktop/src/contract.generated.ts`（Task、TaskDetail、TaskUsage、TaskDetailUsage、UsageRound、TaskRound、TaskRuntime）；新增 `desktop/src/api.ts` 作为唯一调用层，同时定义 provider/settings/健康检查形状。
+- Vue：`Tasks.vue`、`CreateTask.vue`、`TaskDetailPanel.vue`、`Providers.vue`、`Settings.vue` 改用 `api` 与生成的类型；Provider 页渲染 `invalid` 列表，设置页展示“已保存，重启生效”，删除未被引用的 `TaskDetail.vue`。
+- 目标测试：新增 `config-service.test.mjs` 9 项——provider 列表与无效文件、保存保留未知字段并按名更新、校验与删除、设置合并与引用校验、旧版迁移、manager 转发设置并返回 `restartRequired`、manager 路径、路径 fixture 字段契约、catalogue 入口暴露；新增 `contract-types.test.mjs` 3 项——已提交类型与生成器一致、fixture 每个字段出现在类型中、`api.ts` 不重复定义。Rust 侧 `paths.rs` 校验共享 fixture 与字段集合，`tasks.rs` 双向字段表比对 fixture，`settings.rs` 往返形状。
+- 调整：设置保存原本尝试即时生效，但 `UsageModule` 持有构造时的限额对象，且并发测试下改全局配置会串扰其他用例（全量跑出现 2 项只有并发时失败的用例），因此改为明确回复“重启后生效”。旧版本地配置迁移也从 Rust 移到 Node。
+- 完整测试：`360/360` 通过，48 个测试文件。
+- 发布树：`281` 个文件通过。Rust `cargo test --locked` 19/19。
+- 遗留：`desktop/src-tauri/src/tasks.rs` 仍自行解释任务视图字段（以 fixture 双向比对约束）；若要彻底单一来源，可让桌面直接消费生成的 JSON Schema，属后续工作。

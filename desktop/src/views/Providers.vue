@@ -7,8 +7,12 @@
 
         <div v-if="loading" class="loading">加载中...</div>
         <div v-else-if="error" class="error">{{ error }}</div>
+        <div v-if="!loading && !error && invalid.length" class="invalid-files">
+            以下文件无法被 manager 读取：
+            <div v-for="entry in invalid" :key="entry.file">{{ entry.file }}：{{ entry.error }}</div>
+        </div>
 
-        <div v-else class="provider-list">
+        <div v-if="!loading && !error" class="provider-list">
             <div v-if="providers.length === 0" class="empty">暂无服务商</div>
             <div v-for="provider in providers" :key="provider.name" class="provider-card">
                 <div class="provider-header">
@@ -79,19 +83,11 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
-
-interface Provider {
-    name: string;
-    type: string;
-    model: string;
-    baseUrl?: string;
-    apiKeyEnv?: string;
-    dshRepo?: string;
-    maxToolRequests?: number | null;
-}
+import { api } from '../api';
+import type { InvalidProvider, Provider } from '../api';
 
 const providers = ref<Provider[]>([]);
+const invalid = ref<InvalidProvider[]>([]);
 const loading = ref(true);
 const error = ref('');
 const showAddForm = ref(false);
@@ -110,7 +106,9 @@ async function loadProviders() {
     loading.value = true;
     error.value = '';
     try {
-        providers.value = await invoke('get_providers');
+        const response = await api.providers();
+        providers.value = response.providers;
+        invalid.value = response.invalid;
     } catch (e) {
         error.value = String(e);
     } finally {
@@ -142,7 +140,7 @@ async function saveProvider() {
         }
         const config: Provider = { ...form.value, maxToolRequests };
         if (config.type !== 'openai-chat') delete config.maxToolRequests;
-        await invoke('save_provider', { config });
+        await api.saveProvider(config);
         closeForm();
         await loadProviders();
     } catch (e) {
@@ -153,7 +151,7 @@ async function saveProvider() {
 async function deleteProvider(name: string) {
     if (!confirm(`确定删除服务商 ${name}？`)) return;
     try {
-        await invoke('delete_provider', { name });
+        await api.deleteProvider(name);
         await loadProviders();
     } catch (e) {
         error.value = String(e);

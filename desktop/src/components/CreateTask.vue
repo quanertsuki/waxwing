@@ -58,13 +58,14 @@
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { api } from '../api';
+import type { CreateTaskInput } from '../api';
 
 const emit = defineEmits<{ close: []; created: [] }>();
 const submitting = ref(false);
 const error = ref('');
 const maxTokens = ref('');
-const form = ref({
+const form = ref<CreateTaskInput>({
   workspace: '',
   workspaceMode: 'auto',
   prompt: '',
@@ -76,7 +77,7 @@ async function submit() {
   submitting.value = true;
   error.value = '';
   try {
-    const args: Record<string, unknown> = { ...form.value };
+    const args: CreateTaskInput = { ...form.value };
     if (maxTokens.value.trim()) {
       const parsed = Number(maxTokens.value);
       if (!Number.isSafeInteger(parsed) || parsed < 1) {
@@ -84,7 +85,7 @@ async function submit() {
       }
       args.maxTokens = parsed;
     }
-    await invoke('create_task', { args });
+    await api.createTask(args);
     emit('created');
     emit('close');
   } catch (value) {

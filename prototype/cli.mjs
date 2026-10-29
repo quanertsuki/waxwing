@@ -7,13 +7,14 @@ import {fileURLToPath} from 'node:url';
 import {ensureServer,request} from './client.mjs';
 import {config,HERE,cleanEnvironment} from './common.mjs';
 import {cliHelp,parseCliOperation} from '../src/operations/catalogue.mjs';
+import {managerPaths} from '../src/config/paths.mjs';
 
 const out=value=>console.log(JSON.stringify(value,null,2));
 export const WAIT_INITIAL_MS=1000, WAIT_MAX_MS=10000, WAIT_GRACE_MS=30000;
 export const waitTimeoutMs=()=>config.roundTimeoutSeconds*1000+WAIT_GRACE_MS;
 export const nextWaitDelay=previous=>Math.min(previous*2,WAIT_MAX_MS);
 // Help and argument rules are generated from the shared operation catalogue.
-export const HELP_TEXT=cliHelp();
+export const HELP_TEXT=`${cliHelp()}\npaths: print resolved manager paths (data root, token file, URL) as JSON for launchers.`;
 
 /** Parse create/rework/accept JSON (inline or @file) from the catalogue. */
 export function parseCommandArgs(command,args) {
@@ -121,6 +122,12 @@ export async function main() {
   const [command,...args]=process.argv.slice(2);
   if(command==='help') {
     console.log(HELP_TEXT);return;
+  }
+  // Launchers need the resolved paths before a manager exists; this is the
+  // only command that neither starts nor contacts the server.
+  if(command==='paths') {
+    if(args.length) throw new Error('paths takes no arguments');
+    out(managerPaths({here:HERE}));return;
   }
   await ensureServer();
   if(!command || command==='tui'){await tui();return;}

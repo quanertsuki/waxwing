@@ -41,13 +41,13 @@ function firstDefined(...values) {
   return values.find(value => value !== undefined && value !== null && value !== '');
 }
 
-function platformDataRoot(env) {
+export function platformDataRoot(env = process.env, platform = process.platform) {
   if (env.WAXWING_HOME) return path.resolve(env.WAXWING_HOME);
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     const localAppData = env.LOCALAPPDATA || path.join(env.USERPROFILE || env.HOME || '.', 'AppData', 'Local');
     return path.join(localAppData, 'Waxwing');
   }
-  if (process.platform === 'darwin') {
+  if (platform === 'darwin') {
     return path.join(env.HOME || '.', 'Library', 'Application Support', 'Waxwing');
   }
   return path.join(env.XDG_DATA_HOME || path.join(env.HOME || '.', '.local', 'share'), 'waxwing');

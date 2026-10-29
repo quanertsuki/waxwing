@@ -90,13 +90,24 @@ and uses semantic versioning for public releases.
   paths share `src/tasks/wait-loop.mjs`, the capture module only reads the
   view and writes evidence, and the public `create` operation no longer accepts
   internal research fields (`kind`, `batchId`, `shardId`)
+- The desktop no longer interprets configuration. Rust locates the backend and
+  Node, then runs `node prototype/cli.mjs paths` once to get the data root,
+  token file, HTTP URL, and manager script, so the desktop and the manager
+  cannot resolve different paths. Providers, editable settings, and their
+  validation move behind manager operations (`providers_list`, `provider_save`,
+  `provider_delete`, `settings_get`, `settings_save`, `config_info`), and a
+  settings save reports `restartRequired` because the manager reads its limits
+  at startup. Provider file changes stay live. Desktop task, usage, round, and
+  runtime types are generated from the task-view contract fixture
+  (`desktop/src/contract.generated.ts`), every manager call goes through
+  `desktop/src/api.ts`, and the unused `TaskDetail.vue` is removed
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and
   an older `prototype/config.local.json` remains a read-only fallback. Relative
-  paths in the override resolve against the file that contains them; a desktop
-  save moves a legacy file to the new location with its relative paths made
-  absolute
+  paths in the override resolve against the file that contains them; a settings
+  save from any client moves a legacy file to the new location with its relative
+  paths made absolute
 
 ### Fixed
 

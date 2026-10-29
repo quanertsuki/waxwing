@@ -13,6 +13,8 @@ interface.
 | --- | --- |
 | `src/app.mjs` | Public composition root and stable exports |
 | `src/operations/catalogue.mjs` | One operation table: fields, defaults, bounds, entry exposure, annotations, shared validation, CLI parsing, and stable error codes used by the manager, CLI, MCP, and HTTP gateway |
+| `src/config/paths.mjs` | One path resolution for launchers: `node cli.mjs paths` prints the data root, token file, HTTP URL, and manager script the desktop consumes |
+| `src/config/service.mjs` | The only interpreter of provider files and editable settings: Node-side validation, naming, legacy local-config migration, and restart reporting |
 | `src/storage/durable-file.mjs` | Atomic text/JSON writes with transient-rename retry, replace-with-backup transactions, and the shared SHA-256 |
 | `src/adapters/cli.mjs` | CLI adapter; command parsing and help are generated from the operation catalogue |
 | `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases; tool schemas come from the operation catalogue |
@@ -77,6 +79,16 @@ tool schema from it. Entry-specific differences such as MCP's shorter `wait`
 ceiling stay in the catalogue entry. HTTP failures keep their existing `error`
 text and add a stable `code` (`INVALID_ARGUMENT`, `NOT_FOUND`, `CONFLICT`, and
 so on) plus the matching status.
+
+The desktop does not parse configuration. It asks the CLI once for resolved
+paths, then reads and writes providers and settings through manager operations
+(`providers_list`, `provider_save`, `provider_delete`, `settings_get`,
+`settings_save`). Validation therefore uses the same registry and limit rules
+as task creation; a saved provider or limit cannot fail later in `create` for a
+reason the desktop did not see. Settings saves report `restartRequired` because
+the manager read its limits at startup, while provider file changes are live.
+The desktop task types are generated from the same contract fixture the Rust
+and JavaScript tests read.
 
 ## Provider seam
 
@@ -287,7 +299,7 @@ The default data root is `%LOCALAPPDATA%\Waxwing` on Windows,
 `$XDG_DATA_HOME/waxwing` on Linux. `WAXWING_HOME` overrides it. `config.local.json` lives here so a portable or
 package update cannot overwrite local settings; the older
 `prototype/config.local.json` beside `config.json` is still read when the new
-file is absent, and the desktop migrates it on the next save.
+file is absent, and a save migrates it to the new location with its relative paths made absolute.
 
 ```text
 Waxwing/

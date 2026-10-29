@@ -8,6 +8,7 @@ const loaded = loadConfiguration({here: HERE});
 export const config = loaded.config;
 export const CONFIG_PATH = loaded.configPath;
 export const LOCAL_CONFIG_PATH = loaded.localConfigPath;
+export const LOCAL_CONFIG_SOURCE = loaded.localConfigSource;
 
 /**
  * Comparison form of a path: absolute, no trailing separator, and lowercased

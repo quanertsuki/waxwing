@@ -7,7 +7,8 @@ import {randomUUID} from 'node:crypto';
 import {fork, spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnvironment,
-  canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath} from './common.mjs';
+  canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath,
+  CONFIG_PATH,LOCAL_CONFIG_PATH,LOCAL_CONFIG_SOURCE} from './common.mjs';
 import {ACTIVE_TASK_STATUSES, transition} from '../src/tasks/lifecycle.mjs';
 import {budgetFileFor, resolveRoundBudget} from './budget.mjs';
 import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
@@ -35,6 +36,7 @@ import {TaskCommandModule} from '../src/tasks/command.mjs';
 import {TaskRework} from '../src/tasks/rework.mjs';
 import {pollUntilSettled} from '../src/tasks/wait-loop.mjs';
 import {validateOperation} from '../src/operations/catalogue.mjs';
+import {ConfigurationService} from '../src/config/service.mjs';
 
 
 // Default responses are communication-sized summaries. Full instructions and
@@ -151,6 +153,18 @@ export function createManager(options = {}) {
     waitForTaskChanges: (ids, timeoutMs) => taskChanges.wait(ids, timeoutMs),
   });
   let shuttingDown = false;
+
+  // UsageModule keeps the limit object it was constructed with, so make sure a
+  // configuration without limits still yields one stable object.
+  if (!config.usageLimits || typeof config.usageLimits !== 'object' || Array.isArray(config.usageLimits)) {
+    config.usageLimits = {};
+  }
+  const configurationService = options.configurationService ?? new ConfigurationService({
+    config,
+    configPath: CONFIG_PATH,
+    localConfigPath: LOCAL_CONFIG_PATH,
+    localConfigSource: LOCAL_CONFIG_SOURCE,
+  });
 
   const usageModule = new UsageModule({
     configuration: {
@@ -866,6 +880,29 @@ export function createManager(options = {}) {
     research_wait: a => research.wait(a.id, {timeoutSeconds: a.timeoutSeconds}),
     research_collect: a => research.collect(a.id, {offset: a.offset, limit: a.limit}),
     research_cancel: a => research.cancel(a.id),
+    config_info: () => configurationService.info(),
+    providers_list: () => configurationService.providers(),
+    provider_validate: a => configurationService.validate(a.config),
+    provider_save: a => configurationService.saveProvider(a.config),
+    provider_delete: a => configurationService.deleteProvider(a.name),
+    settings_get: () => configurationService.settings(),
+    settings_save(a) {
+      const applied = configurationService.saveSettings(a);
+      // The manager read its configuration at startup. Report the restart
+      // explicitly instead of running with limits the user did not see, and
+      // let the desktop show the notice. Provider file changes are already
+      // live because provider resolution reads the directory per task.
+      return {
+        saved: true,
+        restartRequired: true,
+        localConfigPath: applied.localConfigPath,
+        settings: {
+          defaultProvider: applied.defaultProvider,
+          fallbackProvider: applied.fallbackProvider,
+          usageLimits: applied.usageLimits,
+        },
+      };
+    },
     create: a => createTask(a),
     rework(a) {
       const t = get(a.id);

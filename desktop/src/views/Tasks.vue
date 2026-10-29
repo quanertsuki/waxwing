@@ -64,48 +64,10 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { api } from '../api';
+import type { ManagerHealth, Task } from '../api';
 import TaskDetailPanel from '../components/TaskDetailPanel.vue';
 import CreateTask from '../components/CreateTask.vue';
-
-interface TaskUsage {
-    requests: number;
-    outputTokens?: number;
-    estimatedCostCny: number | null;
-    costComplete: boolean;
-    warnings?: string[];
-}
-
-interface Task {
-    id: string;
-    status: string;
-    statusLabel?: string;
-    roundCount: number;
-    provider?: string | null;
-    model?: string | null;
-    workspace: string;
-    workspaceMode: string;
-    workspaceLabel?: string;
-    summary: string;
-    summaryTruncated?: boolean;
-    error?: string | null;
-    errorTruncated?: boolean;
-    effort?: string;
-    lastRound?: number;
-    live: boolean;
-    accepted: boolean;
-    maxTokens?: number | null;
-    usage: TaskUsage | null;
-    cleanupAuthorized?: boolean;
-    runtimeHealth?: string;
-    createdAt?: string;
-    updatedAt?: string;
-    kind?: 'research';
-    batchId?: string | null;
-    shardId?: string | null;
-}
-
-type ManagerHealth = 'running' | 'unhealthy' | 'notRunning';
 
 const tasks = ref<Task[]>([]);
 const loading = ref(true);
@@ -121,7 +83,7 @@ function selectTask(task: Task) {
 
 async function startManager() {
     try {
-        const success = await invoke<boolean>('start_manager');
+        const success = await api.startManager();
         if (success) {
             managerHealth.value = 'running';
             await loadTasks();
@@ -137,12 +99,12 @@ async function loadTasks(silent = false) {
     if (silent !== true) loading.value = true;
     error.value = '';
     try {
-        managerHealth.value = await invoke<ManagerHealth>('is_manager_running');
+        managerHealth.value = await api.managerHealth();
         if (managerHealth.value !== 'running') {
             tasks.value = [];
             return;
         }
-        tasks.value = await invoke<Task[]>('get_tasks');
+        tasks.value = await api.listTasks();
     } catch (e) {
         error.value = String(e);
     } finally {
