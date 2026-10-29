@@ -8,7 +8,7 @@ import {fork, spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnvironment,
   canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath} from './common.mjs';
-import {transition} from '../src/tasks/lifecycle.mjs';
+import {ACTIVE_TASK_STATUSES, transition} from '../src/tasks/lifecycle.mjs';
 import {budgetFileFor, resolveRoundBudget} from './budget.mjs';
 import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
@@ -33,6 +33,7 @@ import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
 import {TaskCommandModule} from '../src/tasks/command.mjs';
 import {TaskRework} from '../src/tasks/rework.mjs';
+import {pollUntilSettled} from '../src/tasks/wait-loop.mjs';
 import {validateOperation} from '../src/operations/catalogue.mjs';
 
 
@@ -44,7 +45,6 @@ const ERROR_LIMIT = 240;
 const PREVIEW_LIMIT = 400;
 const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
-const ACTIVE_TASK = new Set(['created', 'running', 'stopping']);
 const STATUS_VIEWS = ['summary', 'result', 'history', 'usage', 'report', 'workspace', 'diff', 'log'];
 const isHighSurrogate = c => c >= 0xd800 && c <= 0xdbff;
 const isLowSurrogate = c => c >= 0xdc00 && c <= 0xdfff;
@@ -127,14 +127,28 @@ export function createManager(options = {}) {
     reportsDir: REPORTS,
     atomicJson,
     createTask: input => createTask(input),
-    getTask: id => repository.peek(id) ?? null,
-    closeTask: id => stop(id, true),
+    // Research sees a narrow view: no runtime handle and no task record.
+    shardView: id => {
+      const task = repository.peek(id);
+      if (!task) return null;
+      const rec = workers.get(id);
+      return {
+        id: task.id,
+        status: task.status,
+        error: task.error ?? null,
+        resultText: latestResultText(task),
+        finishReason: task.rounds.at(-1)?.result?.finishReason ?? null,
+        idle: !rec || rec.phase === 'idle',
+      };
+    },
+    closeShard: async id => {
+      const rec = workers.get(id);
+      if (workers.live(id) && rec?.phase !== 'idle') return false;
+      await stop(id, true);
+      return true;
+    },
     cancelTask: id => stop(id, false),
     waitForTaskChanges: (ids, timeoutMs) => taskChanges.wait(ids, timeoutMs),
-    canCloseTask: id => {
-      const rec = workers.get(id);
-      return !workers.live(id) || rec.phase === 'idle';
-    },
   });
   let shuttingDown = false;
 
@@ -431,25 +445,12 @@ export function createManager(options = {}) {
   /** Hold one HTTP/MCP call until the task stops running or the wait expires. */
   async function waitForTask(a) {
     const timeoutSeconds = parseWaitSeconds(a.timeoutSeconds);
-    const startedAt = Date.now();
-    const timeoutMs = timeoutSeconds * 1000;
-    for (;;) {
-      const task = get(a.id);
-      if (!ACTIVE_TASK.has(task.status)) {
-        return {
-          ...statusSummary(task),
-          wait: {timedOut: false, timeoutSeconds, waitedMs: Date.now() - startedAt},
-        };
-      }
-      const remaining = timeoutMs - (Date.now() - startedAt);
-      if (remaining <= 0) {
-        return {
-          ...statusSummary(task),
-          wait: {timedOut: true, timeoutSeconds, waitedMs: Date.now() - startedAt},
-        };
-      }
-      await taskChanges.wait([task.id], remaining);
-    }
+    const wait = await pollUntilSettled({
+      timeoutSeconds,
+      isSettled: () => !ACTIVE_TASK_STATUSES.has(get(a.id).status),
+      waitForChange: remaining => taskChanges.wait([a.id], remaining),
+    });
+    return {...statusSummary(get(a.id)), wait};
   }
   /** Latest-round raw result, one paginated page at a time. */
   function resultPage(t, offset, limit) {

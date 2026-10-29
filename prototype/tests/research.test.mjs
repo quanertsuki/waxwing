@@ -174,3 +174,26 @@ test('research validation rejects duplicate shard IDs before creating a batch', 
     await manager.shutdown();
   }
 });
+
+test('the public create rejects research-only fields instead of building a fake batch task', async () => {
+  const worker = researchFork();
+  const manager = createManager({forkWorker: worker.factory});
+  try {
+    const base = {workspace: scratchRoot, prompt: 'work'};
+    await assert.rejects(
+      () => manager.action('create', {...base, kind: 'research'}),
+      /Invalid argument kind/,
+    );
+    await assert.rejects(
+      () => manager.action('create', {...base, batchId: 'research-abcdefabcdef'}),
+      /Invalid argument batchId/,
+    );
+    await assert.rejects(
+      () => manager.action('create', {...base, shardId: 'alpha'}),
+      /Invalid argument shardId/,
+    );
+    assert.equal(worker.stats.started.length, 0);
+  } finally {
+    await manager.shutdown();
+  }
+});

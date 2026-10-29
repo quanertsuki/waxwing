@@ -7,6 +7,7 @@ import {
   countByShardStatus,
   isActiveBatch,
   isTerminalBatch,
+  shardCapturePatch,
   shardTransition,
 } from './state.mjs';
 import {
@@ -16,6 +17,7 @@ import {
 } from './repository.mjs';
 import {ResearchCapture} from './capture.mjs';
 import {ResearchReport} from './report.mjs';
+import {pollUntilSettled} from '../tasks/wait-loop.mjs';
 
 const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
@@ -97,11 +99,10 @@ export class ResearchBatchService {
     reportsDir,
     atomicJson,
     createTask,
-    getTask,
-    closeTask,
+    shardView,
+    closeShard,
     cancelTask,
     waitForTaskChanges = null,
-    canCloseTask = () => true,
     now = () => new Date().toISOString(),
     makeId = () => `research-${randomUUID().replaceAll('-', '').slice(0, 12)}`,
     digestText = sha256,
@@ -109,15 +110,14 @@ export class ResearchBatchService {
   }) {
     if (typeof atomicJson !== 'function') throw new Error('atomicJson dependency is required');
     if (typeof createTask !== 'function') throw new Error('createTask dependency is required');
-    if (typeof getTask !== 'function') throw new Error('getTask dependency is required');
+    if (typeof shardView !== 'function') throw new Error('shardView dependency is required');
     this.scratchRoot = path.resolve(scratchRoot);
     this.reportsDir = path.resolve(reportsDir);
     this.createTask = createTask;
-    this.getTask = getTask;
-    this.closeTask = closeTask;
+    this.shardView = shardView;
+    this.closeShard = closeShard;
     this.cancelTask = cancelTask;
     this.waitForTaskChanges = waitForTaskChanges;
-    this.canCloseTask = canCloseTask;
     this.now = now;
     this.makeId = makeId;
     this.digestText = digestText;
@@ -284,10 +284,6 @@ export class ResearchBatchService {
     return this.summary(batch);
   }
 
-  async captureTerminal(batch, shard, task) {
-    return this.capture.capture(batch, shard, task);
-  }
-
   /**
    * One in-flight refresh per batch. Concurrent status/wait/collect calls share
    * it, so a shard runtime is closed at most once even when callers overlap.
@@ -306,14 +302,18 @@ export class ResearchBatchService {
     let dirty = false;
     for (const shard of batch.shards) {
       if (!shard.taskId) continue;
-      const task = this.getTask(shard.taskId);
-      const transition = shardTransition(shard, task);
+      const view = this.shardView(shard.taskId);
+      const transition = shardTransition(shard, view);
       Object.assign(shard, transition.patch);
       dirty ||= transition.dirty;
-      if (!task) continue;
+      if (!view) continue;
       if (transition.capture) {
         try {
-          await this.capture.capture(batch, shard, task);
+          await this.capture.read(batch, shard, view);
+          Object.assign(shard, shardCapturePatch(view));
+          shard.resultCaptured = true;
+          shard.tasksAtCapture = view.status;
+          if (shard.status === 'failed') this.capture.writeError(batch, shard, shard.error);
           shard.captureError = null;
         } catch (error) {
           // One unreadable or unwritable shard must not fail the whole batch.
@@ -321,17 +321,15 @@ export class ResearchBatchService {
           shard.error = `capture failed: ${shard.captureError}`;
           shard.status = 'failed';
           shard.resultCaptured = true;
-          shard.tasksAtCapture = task.status;
+          shard.tasksAtCapture = view.status;
         }
         dirty = true;
       }
       if (transition.finalize) {
-        if (typeof this.closeTask === 'function') {
-          if (!this.canCloseTask(task.id)) {
-            continue;
-          }
+        if (typeof this.closeShard === 'function') {
           try {
-            await this.closeTask(task.id);
+            const released = await this.closeShard(shard.taskId);
+            if (released === false) continue;
             shard.runtimeReleased = true;
             shard.finalizing = false;
             shard.taskStatus = 'closed';
@@ -369,32 +367,23 @@ export class ResearchBatchService {
    */
   async wait(id, options = {}) {
     const timeoutSeconds = waitSeconds(options.timeoutSeconds);
-    const startedAt = Date.now();
-    const timeoutMs = timeoutSeconds * 1000;
-    for (;;) {
-      const batch = this.load(id);
-      await this.refresh(batch);
-      const summary = this.summary(batch);
-      if (!isActiveBatch(batch.status)) {
-        return {
-          ...summary,
-          wait: {timedOut: false, timeoutSeconds, waitedMs: Date.now() - startedAt},
-        };
-      }
-      const remaining = timeoutMs - (Date.now() - startedAt);
-      if (remaining <= 0) {
-        return {
-          ...summary,
-          wait: {timedOut: true, timeoutSeconds, waitedMs: Date.now() - startedAt},
-        };
-      }
-      const taskIds = batch.shards.flatMap(shard => shard.taskId ? [shard.taskId] : []);
-      if (typeof this.waitForTaskChanges === 'function' && taskIds.length > 0) {
-        await this.waitForTaskChanges(taskIds, Math.min(remaining, 1000));
-      } else {
-        await new Promise(resolve => setTimeout(resolve, Math.min(remaining, 1000)));
-      }
-    }
+    let latest = null;
+    const wait = await pollUntilSettled({
+      timeoutSeconds,
+      isSettled: async () => {
+        latest = this.load(id);
+        await this.refresh(latest);
+        return !isActiveBatch(latest.status);
+      },
+      waitForChange: remaining => {
+        const taskIds = latest.shards.flatMap(shard => shard.taskId ? [shard.taskId] : []);
+        if (typeof this.waitForTaskChanges === 'function' && taskIds.length > 0) {
+          return this.waitForTaskChanges(taskIds, Math.min(remaining, 1000));
+        }
+        return new Promise(resolve => setTimeout(resolve, Math.min(remaining, 1000)));
+      },
+    });
+    return {...this.summary(latest), wait};
   }
 
   async cancel(id) {

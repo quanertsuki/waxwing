@@ -10,6 +10,18 @@ const ALLOWED = {
   delete: ['closed'],
 };
 
+/** Statuses where a task still owns or may still acquire a runtime. */
+export const ACTIVE_TASK_STATUSES = new Set(['created', 'running', 'stopping']);
+
+/** Statuses after which no round can start without a new task. */
+export const TERMINAL_TASK_STATUSES = new Set([
+  'awaiting_review',
+  'failed',
+  'cancelled',
+  'closed',
+  'accepted',
+]);
+
 const NEXT_STATUS = {
   run: 'running',
   finish: 'awaiting_review',

@@ -17,7 +17,8 @@ interface.
 | `src/adapters/cli.mjs` | CLI adapter; command parsing and help are generated from the operation catalogue |
 | `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases; tool schemas come from the operation catalogue |
 | `src/tasks/repository.mjs` | Task index, deeply frozen records, atomic `task.json`, and the single commit path: save the record, then append events with the next monotonic sequence |
-| `src/tasks/lifecycle.mjs` | Legal task-status transitions |
+| `src/tasks/lifecycle.mjs` | Legal task-status transitions and the shared active/terminal status sets used by the manager and research |
+| `src/tasks/wait-loop.mjs` | One bounded wait loop (deadline, remaining-time arithmetic, `timedOut` result) shared by task and research waits |
 | `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation, and the round-start record+event commit |
 | `src/tasks/command.mjs` | Create command validation order and the immutable inputs the create transaction consumes |
 | `src/tasks/rework.mjs` | One read-only rework decision: status/runtime/workspace/limit refusals, next-round limits, override record and event; shared by the rework action and status summary |
@@ -33,11 +34,11 @@ interface.
 | `src/runtime/supervisor.mjs` | Deprecated facade over the Runtime release/exit gates; removal at 0.3.0 |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants; owns the report+record commit and the policy appendix |
-| `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification |
+| `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification, and `shardCapturePatch`, which decides what a captured shard view means |
 | `src/research/repository.mjs` | Batch storage, atomic `batch.json`, and crash-window orphan reconciliation |
-| `src/research/capture.mjs` | Terminal result/error capture isolated per shard |
+| `src/research/capture.mjs` | Evidence reader/writer for one shard: task result or workspace fallback, plus the error file |
 | `src/research/report.mjs` | Aggregate report projection, atomic write, hash, and paging |
-| `src/research/service.mjs` | Compatibility facade: parallel shards, scratch workspaces, serialized refresh, partial results |
+| `src/research/service.mjs` | Research orchestration over a narrow interface (`shardView`, `closeShard`, `cancelTask`): scratch workspaces, serialized refresh, partial results |
 | `src/tasks/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
 | `src/usage/execution-policy.mjs` | Deprecated forwarding import; removal at 0.3.0 |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
@@ -253,6 +254,16 @@ are referenced by URL or prompt and are not writable shared directories.
 - `research_collect` writes one aggregate report under `<WAXWING_HOME>/reports`
   and returns a bounded page plus a content hash.
 - `research_cancel` stops unfinished shards and retains completed evidence.
+
+The research service never reads a task record or a runtime handle. The manager
+supplies three functions: `shardView(id)` returns the narrow view (status,
+error, result text, finish reason, idle), `closeShard(id)` releases a finished
+shard and returns `false` while it is still live, and `cancelTask(id)` stops an
+unfinished one. `shardTransition` and `shardCapturePatch` in
+`src/research/state.mjs` decide what each view means, so evidence
+classification has one implementation and the research tests run without a
+manager. The active/terminal status sets come from `src/tasks/lifecycle.mjs`,
+and both task and research waits use `src/tasks/wait-loop.mjs`.
 
 This supports parallel reading, source comparison, and synthesis. It does not
 allow multiple execution Agents to write concurrently in one physical project

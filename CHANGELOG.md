@@ -82,6 +82,14 @@ and uses semantic versioning for public releases.
   `fullPricing` now selects the pricing source that knows the task model
   instead of the first source. `UsageService` and the module's unused
   re-exports are marked deprecated
+- Research depends on a narrow manager interface instead of task records and
+  runtime handles: the manager supplies `shardView`, `closeShard`, and
+  `cancelTask`, while `shardTransition` and the new `shardCapturePatch` in
+  `src/research/state.mjs` decide shard state and evidence classification. The
+  active/terminal status sets move to `src/tasks/lifecycle.mjs`, both wait
+  paths share `src/tasks/wait-loop.mjs`, the capture module only reads the
+  view and writes evidence, and the public `create` operation no longer accepts
+  internal research fields (`kind`, `batchId`, `shardId`)
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and

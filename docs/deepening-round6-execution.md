@@ -219,3 +219,19 @@
 - 完整测试：`334/334` 通过，47 个测试文件。
 - 发布树：`272` 个文件通过。
 - 遗留：`prototype/usage.mjs` 的转发入口每次调用新建一个 `UsageModule`，只在兼容期使用；按计划在 0.3.0 随兼容层一起删除。
+
+#### #13 Research 依赖窄接口
+
+状态：完成。
+
+- `src/tasks/lifecycle.mjs`：导出 `ACTIVE_TASK_STATUSES`（`created`/`running`/`stopping`）和 `TERMINAL_TASK_STATUSES`（`awaiting_review`/`failed`/`cancelled`/`closed`/`accepted`）；manager 与 `src/research/state.mjs` 使用同一组集合，不再各自维护。
+- 新增 `src/tasks/wait-loop.mjs`：`pollUntilSettled({timeoutSeconds, isSettled, waitForChange, now})` 统一处理截止时间、剩余时间与 `{timedOut, timeoutSeconds, waitedMs}` 结果；manager 的 `waitForTask` 和 research 的 `wait` 都改用它。
+- `src/research/state.mjs`：`shardTransition` 只读窄视图；新增 `shardCapturePatch(view)`，把取消、失败（含 `finishReason: 'error'`）、完成统一映射为 `{status, error}`，证据含义不再由 capture 决定。
+- `src/research/capture.mjs`：`capture()` 拆成 `read(batch, shard, view)`（读取视图结果，缺失时读工作区 `research-result.md`，有内容就写结果文件）和 `writeError(batch, shard, error)`；不再读取任务记录。
+- `src/research/service.mjs`：依赖改为必需的 `shardView`、可选的 `closeShard`/`cancelTask`；刷新用视图做迁移，捕获后由 `shardCapturePatch` 定状态，`closeShard` 返回 `false` 视为仍在收尾；删除残留的 `captureTerminal` 死方法。
+- `prototype/manager.mjs`：注入 `shardView`（状态、错误、最新结果文本、finishReason、idle）、`closeShard`（忙时返回 `false`，否则 `stop(id, true)`）和 `cancelTask`（`stop(id, false)`）；删除本地 `ACTIVE_TASK` 与手写等待循环。
+- `src/operations/catalogue.mjs`：公开 `create` 不再声明 `kind`/`batchId`/`shardId`，网关、CLI、MCP 会以 `Invalid argument` 拒绝这些内部字段；research 内部仍通过 `createTask` 直接建任务。
+- 目标测试：新增 `research-modules.test.mjs` 4 项——Repository 保存/缓存/重载/非法 ID、重启把无任务的 planned 分片收敛为孤立失败、Capture 读取任务结果与工作区回退并写证据/错误文件、Report 内容稳定哈希与分页且损坏证据不让收集失败；`research-state.test.mjs` 增加 `shardCapturePatch` 7 行表驱动和共享状态集合 1 项；`research-refresh.test.mjs` 新增取消测试 1 项（只取消未完成分片、保留已完成证据、批次进入 `partial`）；`research.test.mjs` 新增公开 `create` 拒绝研究字段 1 项。
+- 完整测试：`348/348` 通过，48 个测试文件。
+- 发布树：`274` 个文件通过。
+- 遗留：research service 仍自行构造 repository/capture/report，装配函数未与 manager 分离；属 #15 的 manager 装配范围。
