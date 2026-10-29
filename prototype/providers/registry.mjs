@@ -1,17 +1,29 @@
-// Provider registry: enumerate, load, and validate provider configurations.
+// Provider registry: enumerate, load, resolve, and validate provider
+// configurations. Adapter types register here; everything else asks the
+// registry for an adapter, its capabilities, or its task preparation.
 // Provider configs are stored as individual JSON files in providersDir.
 
 import fs from 'node:fs';
 import path from 'node:path';
+import {DshSdkAdapter} from './dsh-sdk.mjs';
 import {OpenAIChatAdapter} from './openai-chat.mjs';
 
 const ADAPTER_TYPES = {
     'openai-chat': OpenAIChatAdapter,
-    // DSH SDK is handled natively in worker.mjs, not through an adapter
+    'dsh-sdk': DshSdkAdapter,
     // Future adapters register here:
     // 'anthropic-native': AnthropicNativeAdapter,
     // 'openai-responses': OpenAIResponsesAdapter,
 };
+
+/** Built-in names that need no provider JSON file, mapped to their type. */
+const BUILTIN_PROVIDERS = new Map([
+    ['dsh-sdk', 'dsh-sdk'],
+    ['dsh', 'dsh-sdk'],
+]);
+
+/** The built-in DSH SDK provider: the default when a task names no provider. */
+export const DEFAULT_PROVIDER_NAME = 'dsh-sdk';
 
 /**
  * Validate a provider configuration object.
@@ -27,9 +39,8 @@ export function validateProviderConfig(config) {
     if (!config.type || typeof config.type !== 'string') {
         throw new Error(`Provider ${config.name}: type is required`);
     }
-    // dsh-sdk is handled natively in worker.mjs
-    if (config.type !== 'dsh-sdk' && !ADAPTER_TYPES[config.type]) {
-        throw new Error(`Provider ${config.name}: unknown type "${config.type}". Supported: ${Object.keys(ADAPTER_TYPES).join(', ')}, dsh-sdk`);
+    if (!ADAPTER_TYPES[config.type]) {
+        throw new Error(`Provider ${config.name}: unknown type "${config.type}". Supported: ${Object.keys(ADAPTER_TYPES).join(', ')}`);
     }
     if (config.maxToolRequests !== undefined && config.maxToolRequests !== null) {
         if (!Number.isSafeInteger(config.maxToolRequests) || config.maxToolRequests < 0) {
@@ -80,20 +91,49 @@ export function loadProvider(providersDir, name) {
 }
 
 /**
- * Create a provider adapter instance from a config.
+ * Resolve a provider name to its config: a built-in provider first, then the
+ * provider directory. `model` fills the built-in model, which follows the
+ * manager configuration rather than a provider file.
  */
-export function createAdapter(config) {
+export function resolveProvider(providersDir, name, {model} = {}) {
+    const builtin = BUILTIN_PROVIDERS.get(name);
+    if (builtin) return {name: builtin, type: builtin, model};
+    return loadProvider(providersDir, name);
+}
+
+/**
+ * Capabilities declared by the adapter for this provider config. The manager
+ * reads these instead of branching on a provider type name.
+ */
+export function capabilitiesFor(config) {
     validateProviderConfig(config);
-    const AdapterClass = ADAPTER_TYPES[config.type];
-    return new AdapterClass(config);
+    return ADAPTER_TYPES[config.type].capabilities(config);
+}
+
+/**
+ * Let the provider write the files a task needs before its first round.
+ * Providers without task preparation return null.
+ */
+export function prepareTask(config, task, context) {
+    validateProviderConfig(config);
+    return ADAPTER_TYPES[config.type].prepareTask?.(task, context) ?? null;
+}
+
+/**
+ * Create a provider adapter instance from a config.
+ * @param options - adapter options, such as the DSH checkout or a test transport
+ */
+export function createAdapter(config, options = {}) {
+    validateProviderConfig(config);
+    return new ADAPTER_TYPES[config.type](config, options);
 }
 
 /**
  * Create a provider adapter by name from a directory.
  */
-export function createAdapterFromDir(providersDir, name) {
-    const config = loadProvider(providersDir, name);
-    return createAdapter(config);
+export function createAdapterFromDir(providersDir, name, {model, options} = {}) {
+    const config = resolveProvider(providersDir, name, {model});
+    return createAdapter(config, options);
 }
 
 /**

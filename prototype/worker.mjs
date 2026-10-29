@@ -1,15 +1,14 @@
 // Worker process: receives task runs from manager via IPC, executes one round
-// of conversation through the appropriate provider adapter, and reports results.
-// Two provider paths:
-//   - "dsh-sdk": legacy DeepSeek via DSH SDK (stable, 34 tasks validated)
-//   - "openai-chat": any OpenAI-compatible endpoint via direct HTTP
+// of conversation through the Provider adapter that task names, and reports
+// results. The Worker never branches on a provider type: the registry resolves
+// the adapter, and the adapter's capabilities decide what a round receives.
 
-import path from 'node:path';
-import {pathToFileURL} from 'node:url';
 import {config} from './common.mjs';
-import {assertMaxTokens, budgetFileFor, writeRoundBudget} from './budget.mjs';
+import {assertMaxTokens} from './budget.mjs';
 import {parseOptionalEffort} from './effort.mjs';
 import {createAdapterCache} from '../src/providers/adapter-cache.mjs';
+import {DEFAULT_PROVIDER_NAME, resolveProvider} from './providers/registry.mjs';
+import {buildMinimalTools, executeTool} from '../src/worker/tools.mjs';
 import {
     ROUND_PROTOCOL_VERSION,
     ackMessage,
@@ -26,10 +25,10 @@ import {
     workerBusyMessage,
 } from '../src/runtime/protocol.mjs';
 
-let harness, busy = false, closing = false;
+let busy = false, closing = false;
 // Keyed by the current round's Provider: a fallback in the same Worker process
 // must not keep calling the Provider that just failed.
-const adapters = createAdapterCache();
+const adapters = createAdapterCache({adapterOptions: {dshRepo: config.dshRepo}});
 let activeAbort = null;
 let closeFinished = false;
 
@@ -48,7 +47,7 @@ async function finishClose() {
     closeFinished = true;
     activeAbort?.abort();
     try {
-        await harness?.close();
+        await adapters.closeAll();
         send(closedMessage());
     } catch (e) {
         send(closeErrorMessage({error: String(e.message)}));
@@ -101,13 +100,34 @@ process.on('message', async message => {
             ? undefined
             : parseOptionalEffort(rawEffort, 'round effort');
 
-        // Determine provider type from task or fall back to DSH SDK
-        const providerType = task?.provider?.type || 'dsh-sdk';
-
-        if (providerType === 'openai-chat') {
-            await runOpenAIChat(task, message.prompt, maxTokens, effort, message.signal);
-        } else {
-            await runDshSdk(task, message.prompt, maxTokens, message.budgetFile);
+        const provider = task?.provider
+            ?? resolveProvider(config.providersDir, DEFAULT_PROVIDER_NAME, {model: config.model});
+        const adapter = adapters.adapterFor(provider);
+        const capabilities = adapter.capabilities ?? {};
+        const controller = new AbortController();
+        activeAbort = controller;
+        try {
+            const result = await adapter.run({
+                prompt: message.prompt,
+                history: task?.history || [],
+                tools: buildMinimalTools(),
+                maxTokens,
+                // Only a provider that declares effort receives it.
+                effort: capabilities.effort ? effort : undefined,
+                signal: controller.signal,
+                task,
+                budgetFile: message.budgetFile,
+                onToolCall: (name, args) => executeTool(name, args, task?.workspace),
+                onEvent: event => channel.send('event', eventMessage(event)),
+                // The DSH harness starts its session lazily on the first round.
+                onStart: () => send(readyMessage({...runtimeIdentity, roundId: channel.roundId})),
+            });
+            channel.send('result', resultMessage({
+                text: result.text,
+                finishReason: result.finishReason,
+            }));
+        } finally {
+            if (activeAbort === controller) activeAbort = null;
         }
     } catch (e) {
         // Provider events are streamed exactly once through onEvent; do not
@@ -123,172 +143,3 @@ process.on('message', async message => {
         if (closing) await finishClose();
     }
 });
-
-// --- DSH SDK path (legacy DeepSeek, stable) ---
-async function runDshSdk(task, prompt, maxTokens, budgetFile) {
-    // Publish the round budget before any harness work so the mounted
-    // task-budget plugin reads this round's value from the very first request.
-    const bf = budgetFile ?? budgetFileFor(path.dirname(task.patch));
-    writeRoundBudget(bf, maxTokens);
-
-    if (!harness) {
-        const {DeepSeekHarness} = await import(
-            pathToFileURL(path.join(config.dshRepo, 'packages/sdk/client/lib/index.js')).href
-        );
-        harness = new DeepSeekHarness({
-            dshBin: path.join(config.dshRepo, 'apps/cli/lib/bin.js'),
-            profile: 'sdk',
-            dshHome: task.home,
-            cwd: task.workspace,
-            processCwd: task.workspace,
-            provider: 'deepseek-official',
-            model: task.model,
-            maxTokens,
-            patches: [task.patch],
-            env: {...process.env, DSH_HOME: task.home},
-            initializeTimeoutMs: 60000,
-            shutdownTimeoutMs: 4000,
-            disposeEofGraceMs: 6000,
-        });
-        await harness.start();
-        send(readyMessage({...runtimeIdentity, roundId: channel.roundId}));
-    }
-
-    const result = await harness.run(prompt, {
-        sessionId: task.sessionId,
-        onNotification: n => channel.send('event', eventMessage(n)),
-    });
-
-    const ending = result.events.filter(e => e.type === 'turn/end').at(-1);
-    channel.send('result', resultMessage({
-        text: result.finalResponse,
-        finishReason: ending?.data?.reason?.kind ?? 'unknown'
-    }));
-}
-
-// --- OpenAI-compatible HTTP path ---
-async function runOpenAIChat(task, prompt, maxTokens, effort, signal) {
-    const adapter = adapters.adapterFor(task.provider);
-
-    send(readyMessage({...runtimeIdentity, roundId: channel.roundId}));
-
-    // Build minimal tool set: Bash + file I/O
-    const tools = buildMinimalTools();
-
-    // Tool executor: runs inside worker process with task workspace as cwd
-    const onToolCall = async (name, args) => executeTool(name, args, task.workspace);
-
-    const controller = new AbortController();
-    activeAbort = controller;
-    try {
-        const onEvent = event => channel.send('event', eventMessage(event));
-        const result = await adapter.run({
-            prompt,
-            history: task.history || [],
-            tools,
-            maxTokens,
-            effort,
-            signal: signal ?? controller.signal,
-            onToolCall,
-            onEvent
-        });
-
-        channel.send('result', resultMessage({
-            text: result.text,
-            finishReason: result.finishReason
-        }));
-    } finally {
-        if (activeAbort === controller) activeAbort = null;
-    }
-}
-
-// Minimal tool set for OpenAI-compatible providers
-function buildMinimalTools() {
-    return [
-        {
-            name: 'bash',
-            description: 'Execute a shell command and return its output. Runs in the task workspace directory.',
-            input_schema: {
-                type: 'object',
-                properties: {
-                    command: {type: 'string', description: 'The shell command to execute'}
-                },
-                required: ['command']
-            }
-        },
-        {
-            name: 'read_file',
-            description: 'Read contents of a file (relative to workspace or absolute path)',
-            input_schema: {
-                type: 'object',
-                properties: {
-                    path: {type: 'string', description: 'File path to read'}
-                },
-                required: ['path']
-            }
-        },
-        {
-            name: 'write_file',
-            description: 'Write content to a file (relative to workspace or absolute path)',
-            input_schema: {
-                type: 'object',
-                properties: {
-                    path: {type: 'string', description: 'File path to write'},
-                    content: {type: 'string', description: 'Content to write'}
-                },
-                required: ['path', 'content']
-            }
-        }
-    ];
-}
-
-// Execute a tool call inside the worker process
-import {exec} from 'node:child_process';
-import {promisify} from 'node:util';
-const execAsync = promisify(exec);
-
-async function executeTool(name, args, workspace) {
-    try {
-        if (name === 'bash') {
-            const cmd = args.command;
-            if (!cmd || typeof cmd !== 'string') return {content: 'Error: command is required'};
-            const {stdout, stderr} = await execAsync(cmd, {
-                cwd: workspace,
-                timeout: 60000,
-                maxBuffer: 1024 * 1024,
-                windowsHide: true
-            });
-            return {content: stdout + (stderr ? `\n[stderr]\n${stderr}` : '')};
-        }
-        if (name === 'read_file') {
-            const p = args.path;
-            if (!p || typeof p !== 'string') return {content: 'Error: path is required'};
-            const fs = await import('node:fs');
-            const path = await import('node:path');
-            const fullPath = path.isAbsolute(p) ? p : path.join(workspace, p);
-            // Prevent reading outside workspace unless absolute path given
-            if (!path.isAbsolute(p) && !fullPath.startsWith(path.resolve(workspace))) {
-                return {content: 'Error: path must stay inside the workspace'};
-            }
-            const content = fs.readFileSync(fullPath, 'utf8');
-            // Truncate large files
-            return {content: content.length > 50000 ? content.slice(0, 50000) + '\n...[truncated]' : content};
-        }
-        if (name === 'write_file') {
-            const p = args.path;
-            if (!p || typeof p !== 'string') return {content: 'Error: path is required'};
-            const fs = await import('node:fs');
-            const path = await import('node:path');
-            const fullPath = path.isAbsolute(p) ? p : path.join(workspace, p);
-            if (!path.isAbsolute(p) && !fullPath.startsWith(path.resolve(workspace))) {
-                return {content: 'Error: path must stay inside the workspace'};
-            }
-            fs.mkdirSync(path.dirname(fullPath), {recursive: true});
-            fs.writeFileSync(fullPath, args.content || '', 'utf8');
-            return {content: `Written ${args.content?.length || 0} bytes to ${p}`};
-        }
-        return {content: `Error: unknown tool "${name}"`};
-    } catch (e) {
-        return {content: `Error executing ${name}: ${e.message}`};
-    }
-}

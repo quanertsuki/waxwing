@@ -14,7 +14,7 @@ import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
 import {effectiveLimits} from '../src/usage/policy.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
 import {ExecutionPolicy} from '../src/usage/execution-policy.mjs';
-import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
+import {capabilitiesFor, prepareTask, resolveProvider} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {RuntimeSettlement} from '../src/runtime/settlement.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
@@ -36,7 +36,6 @@ import {TaskCommandModule} from '../src/tasks/command.mjs';
 import {TaskRework} from '../src/tasks/rework.mjs';
 import {validateOperation} from '../src/operations/catalogue.mjs';
 
-const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/');
 
 // Default responses are communication-sized summaries. Full instructions and
 // results stay in task.json and the exported report; callers opt into pages of
@@ -163,16 +162,13 @@ export function createManager(options = {}) {
     try { return resolveRoundBudget({inherited: t.maxTokens, fallback: config.maxTokens}); }
     catch { return null; }
   }
-  /** Reasoning effort is only sent to openai-chat providers that support it. */
+  /** The adapter declares whether it accepts reasoning effort. */
   function supportsEffort(provider) {
-    return provider?.type === 'openai-chat' && provider.supportsReasoning === true;
+    try { return capabilitiesFor(provider).effort; } catch { return false; }
   }
-  /** Built-in DSH SDK provider plus JSON provider files share one resolver. */
+  /** Built-in providers plus JSON provider files share one resolver. */
   function providerByName(name) {
-    if (name === 'dsh-sdk' || name === 'dsh') {
-      return {name: 'dsh-sdk', type: 'dsh-sdk', model: config.model};
-    }
-    return loadProvider(config.providersDir, name);
+    return resolveProvider(config.providersDir, name, {model: config.model});
   }
   function effectiveEffort(t) {
     if (!supportsEffort(t.provider)) return null;
@@ -559,25 +555,6 @@ export function createManager(options = {}) {
     }
     research.restore();
   }
-  function patchFor(t) {
-    // No credential copying. Runtime reads the configured credential store.
-    // The task-budget plugin is mounted by absolute path and reads only the
-    // task's own budget file; it does not touch the DSH installation.
-    const patch = [
-      {id: 'credentials', config: {path: path.resolve(config.credentialsFile), watch: false}},
-      {id: 'session-log-deepseek', config: {enabled: false}},
-      {id: 'session-telemetry-otel', disabled: true},
-      {id: 'session-title-llm', disabled: true},
-      {id: 'spill-local', config: {root: path.join(directory(t.id), 'tmp', 'spill')}},
-      {id: 'sdk-jsonrpc-server', config: {maxTokensAsSuccess: false}},
-      // A new plugin row must be inserted; a flat {id} row would be an override
-      // targeting an existing entry and would never mount.
-      {insert: [
-        {id: 'task-budget', name: BUDGET_PLUGIN, config: {budgetFile: budgetFileFor(directory(t.id)).replaceAll('\\', '/')}},
-      ]},
-    ];
-    fs.writeFileSync(t.patch, JSON.stringify(patch, null, 2)); // JSON is a valid YAML patch list.
-  }
   function defaultForkWorker(t, runtime = {}) {
     return fork(path.join(HERE, 'worker.mjs'), [
       `--waxwing-owner=${runtime.ownerMarker}`,
@@ -775,8 +752,8 @@ export function createManager(options = {}) {
         prompt: effectivePrompt,
         maxTokens,
         effort,
-        // Only pass budgetFile for DSH SDK providers.
-        budgetFile: next.provider?.type === 'dsh-sdk' ? budgetFileFor(directory(next.id)) : null,
+        // Only a provider that declares a budget patch gets a per-round file.
+        budgetFile: capabilitiesFor(next.provider).budgetPatch ? budgetFileFor(directory(next.id)) : null,
         timeouts: roundTimeouts(config),
       });
     } catch (error) {
@@ -849,8 +826,8 @@ export function createManager(options = {}) {
           t.batchId = a.batchId;
           t.shardId = a.shardId;
         }
-        // Only write DSH runtime patch for DSH SDK providers.
-        if (preflight.provider.type === 'dsh-sdk') patchFor(t);
+        // The adapter writes whatever files its task needs before round one.
+        prepareTask(preflight.provider, t, {directory: dir, credentialsFile: config.credentialsFile});
         return t;
       },
     });

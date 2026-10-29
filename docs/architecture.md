@@ -42,7 +42,11 @@ interface.
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
 | `src/usage/module.mjs` | One usage seam: indexing, pricing, limit inheritance, threshold evaluation, and the one-round override decision |
 | `src/usage/service.mjs` | Deprecated compatibility adapter; production callers use `UsageModule` |
-| `src/providers/registry.mjs` | Provider discovery and adapter selection |
+| `src/providers/registry.mjs` | Provider discovery, built-in provider names, adapter selection, declared capabilities, and task preparation |
+| `prototype/providers/base.mjs` | Provider adapter interface: one round in, bare DSH-format events out, declarative capabilities |
+| `prototype/providers/dsh-sdk.mjs` | DSH SDK adapter: one long-lived harness session, the task runtime patch, and the per-round budget file |
+| `prototype/providers/openai-chat.mjs` | OpenAI-compatible adapter: tool loop, streaming, and an injectable HTTP transport |
+| `src/worker/tools.mjs` | Worker-side bash/read/write tool set and executor |
 | `src/providers/adapter-cache.mjs` | One adapter per Provider identity inside a Worker process |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
 | `prototype/` | Legacy entry-point and data compatibility until at least `0.2.0` |
@@ -69,6 +73,19 @@ tool schema from it. Entry-specific differences such as MCP's shorter `wait`
 ceiling stay in the catalogue entry. HTTP failures keep their existing `error`
 text and add a stable `code` (`INVALID_ARGUMENT`, `NOT_FOUND`, `CONFLICT`, and
 so on) plus the matching status.
+
+## Provider seam
+
+`provider.type` selects exactly one adapter through
+`src/providers/registry.mjs`; no other module branches on the type name. Each
+adapter declares capabilities — reasoning effort, in-process session
+continuity, and whether the task needs a runtime patch and a per-round budget
+file — so the manager and the Worker ask the adapter what a round receives.
+The DSH SDK adapter owns its harness session and the task runtime patch; the
+openai-chat adapter owns its tool loop and accepts an injected HTTP transport,
+so its tests need no loopback server. Both stream bare DSH-format events through
+`onEvent`, and the Worker wraps each one with the round protocol before the
+manager validates it.
 
 ## System view
 

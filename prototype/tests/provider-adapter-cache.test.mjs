@@ -67,3 +67,17 @@ test('the caller provider object is never modified', () => {
   assert.notEqual(rotated, adapter);
   assert.equal(rotated.config.apiKey, 'rotated-key');
 });
+
+test('closeAll closes every adapter the process built, newest first', async () => {
+  const closed = [];
+  const createAdapter = config => ({
+    config,
+    async close() { closed.push(config.name); },
+  });
+  const cache = createAdapterCache({createAdapter, adapterOptions: {marker: true}});
+  cache.adapterFor({name: 'first', type: 'openai-chat'});
+  cache.adapterFor({name: 'second', type: 'openai-chat'});
+  await cache.closeAll();
+  assert.deepEqual(closed, ['second', 'first']);
+  assert.equal(cache.current, null);
+});

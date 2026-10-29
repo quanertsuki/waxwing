@@ -187,3 +187,20 @@
 - 完整测试：`320/320` 通过，45 个测试文件。
 - 发布树：`266` 个文件通过。
 - 遗留：`validateMessage` 仍接受不带 `protocolVersion` 的消息（兼容旧 Worker），只在版本出现且不符时拒绝；若后续要求严格版本，需要同时升级 Worker 与 manager 并保留一段兼容期。
+
+#### #11 Provider Seam 变成真实的 Seam
+
+状态：完成。
+
+- `prototype/providers/base.mjs`：`ProviderAdapter` 增加 `static capabilities(config)`（effort、sessionContinuity、budgetPatch），实例通过 `capabilities` getter 读取；删除抽象 `buildUsageEvents`，契约改成“每轮返回 `{text, finishReason}`，事件只经 `onEvent` 发出”，`close()` 默认空实现。
+- 新增 `prototype/providers/dsh-sdk.mjs`：DSH 路径成为第二个 Adapter。它持有长期 harness 会话，`prepareTask` 静态方法负责写任务运行时 patch（含按插入方式挂载的 budget 插件），`run` 在开跑前写本轮预算文件，首次启动时调用 `onStart`，`close` 释放 harness；`createHarness` 可注入，测试不需要真实 DSH 仓库。
+- `prototype/providers/openai-chat.mjs`：声明能力；HTTP 调用改为构造器注入的 `transport`（默认仍是 `http`/`https`）；`buildUsageEvents` 降为模块内 `usageEvents`；删除 `estimateTokens`、`buildOpenAIRequest`、`mapStopReason`、`openaiToAnthropic` 约 120 行死代码。
+- `prototype/providers/registry.mjs`：`dsh-sdk` 与 `openai-chat` 一样注册在 `ADAPTER_TYPES`；新增 `resolveProvider`（内置 `dsh`/`dsh-sdk` 先于 provider JSON）、`capabilitiesFor`、`prepareTask`、`DEFAULT_PROVIDER_NAME`，`createAdapter` 接受构造选项；`src/providers/registry.mjs` 转出这些新接口。
+- `src/providers/adapter-cache.mjs`：接受 `adapterOptions` 并传给每个 Adapter；新增 `closeAll()`，按构建顺序倒序关闭所有 Adapter（包括被 fallback 替换掉的旧 Adapter）。
+- `prototype/worker.mjs`：不再按 `providerType` 分派，改为 `adapterFor(task.provider)`；只把 Adapter 声明的能力对应参数传下去；工具调用走 `src/worker/tools.mjs`；删除 `runDshSdk`、`runOpenAIChat`、内联工具实现和 `message.signal`。
+- `prototype/manager.mjs`：`supportsEffort` 读能力，`providerByName` 走 `resolveProvider`；`budgetFile` 由 `capabilitiesFor(...).budgetPatch` 决定；任务 patch 由 `prepareTask` 写入；删除 `patchFor` 和 `BUDGET_PLUGIN`。源码中不再出现 Provider 类型字面量。
+- 新增 `src/worker/tools.mjs`：`buildMinimalTools`、`resolveToolPath`、`executeTool`，相对路径逃逸工作区被拒，所有失败以 `{content: 'Error: ...'}` 返回。
+- 目标测试：新增 `provider-contract.test.mjs` 7 项——两个 Adapter 的同一轮结果形状与事件通过协议校验；能力替代类型分支（并扫描 manager/worker 源码无类型判断）；DSH 跨轮复用 harness、只宣布一次启动、关闭释放；openai 注入传输下的工具循环、上游 500、流中断；内置 provider 解析与未知类型拒绝；`prepareTask` 只为 DSH 写 patch。新增 `worker-tools.test.mjs` 4 项——工具清单、相对路径读写、路径逃逸、bash 工作目录与错误内容；`provider-adapter-cache.test.mjs` 新增 `closeAll` 1 项。
+- 完整测试：`332/332` 通过，47 个测试文件。
+- 发布树：`270` 个文件通过。
+- 遗留：Worker 的 `read_file`/`write_file` 仍接受任意绝对路径（与 Bash 工具同级，本身不构成额外权限边界）；是否限制在工作区内仍需权儿决定。Adapter 的 `sessionContinuity` 目前只作声明，openai-chat 不持久化跨轮历史。

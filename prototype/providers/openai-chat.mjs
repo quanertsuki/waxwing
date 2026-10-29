@@ -11,11 +11,6 @@ function genId(prefix) {
     return prefix + crypto.randomBytes(12).toString('hex');
 }
 
-function estimateTokens(obj) {
-    const s = typeof obj === 'string' ? obj : JSON.stringify(obj);
-    return Math.max(1, Math.round(s.length / 3.2));
-}
-
 // Convert Anthropic message history to OpenAI format
 function toOpenAIMessages(body) {
     const out = [];
@@ -97,31 +92,6 @@ function toOpenAITools(tools) {
         type: 'function',
         function: {name: t.name, description: t.description || '', parameters: t.input_schema || {type: 'object', properties: {}}}
     }));
-}
-
-function buildOpenAIRequest(body, stream) {
-    const req = {
-        model: body.model || 'llm-default',
-        messages: toOpenAIMessages(body),
-        stream
-    };
-    const tools = toOpenAITools(body.tools);
-    if (tools) req.tools = tools;
-    if (typeof body.max_tokens === 'number') req.max_tokens = body.max_tokens;
-    if (typeof body.temperature === 'number') req.temperature = body.temperature;
-    if (typeof body.top_p === 'number') req.top_p = body.top_p;
-    if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) req.stop = body.stop_sequences;
-    return req;
-}
-
-function mapStopReason(r, hasToolUse) {
-    if (hasToolUse) return 'tool_use';
-    switch (r) {
-        case 'length': return 'max_tokens';
-        case 'tool_calls': return 'tool_use';
-        case 'content_filter': return 'end_turn';
-        default: return 'end_turn';
-    }
 }
 
 function normalizeFinishReason(reason) {
@@ -209,38 +179,6 @@ function responseFromStream(state) {
         created: state.created || undefined,
         choices: [{message, finish_reason: state.finishReason}],
         usage: state.usage || {},
-    };
-}
-
-function openaiToAnthropic(json, modelName) {
-    const choice = json.choices?.[0] || {};
-    const message = choice.message || {};
-    const content = [];
-    if (message.reasoning_content) {
-        content.push({type: 'thinking', thinking: message.reasoning_content, signature: 'openai-chat'});
-    }
-    if (message.content) content.push({type: 'text', text: message.content});
-    let hasToolUse = false;
-    for (const tc of message.tool_calls || []) {
-        hasToolUse = true;
-        let input = {};
-        try { input = JSON.parse(tc.function.arguments || '{}'); } catch { input = {}; }
-        content.push({type: 'tool_use', id: tc.id || genId('toolu_'), name: tc.function.name, input});
-    }
-    const usage = json.usage || {};
-    return {
-        id: json.id || genId('msg_'),
-        type: 'message',
-        role: 'assistant',
-        model: modelName,
-        content,
-        stop_reason: mapStopReason(choice.finish_reason, hasToolUse),
-        stop_sequence: null,
-        usage: {
-            input_tokens: usage.prompt_tokens || 0,
-            output_tokens: usage.completion_tokens || 0,
-            ...(usage.prompt_tokens_details?.cached_tokens ? {cache_read_input_tokens: usage.prompt_tokens_details.cached_tokens} : {})
-        }
     };
 }
 
@@ -366,9 +304,42 @@ function callEndpoint(url, body, apiKey, signal, onProgress) {
     });
 }
 
+function usageEvents(response, providerName, defaultModel) {
+    const usage = response.usage || {};
+    const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
+    const uncachedInput = (usage.prompt_tokens || 0) - cachedTokens;
+
+    return [{
+        type: 'assistant/message',
+        time: (response.created || Math.floor(Date.now() / 1000)) * 1000,
+        data: {
+            usage: {
+                inputTokens: Math.max(0, uncachedInput),
+                cacheReadTokens: cachedTokens,
+                cacheWriteTokens: 0,
+                outputTokens: usage.completion_tokens || 0,
+                totalTokens: usage.total_tokens || 0
+            },
+            message: {
+                id: response.id || genId('msg_'),
+                source: {provider: providerName, model: response.model || defaultModel}
+            }
+        }
+    }];
+}
+
 export class OpenAIChatAdapter extends ProviderAdapter {
-    constructor(config) {
+    static capabilities(config) {
+        return {effort: config?.supportsReasoning === true, sessionContinuity: false, budgetPatch: false};
+    }
+
+    /**
+     * @param options.transport - injectable HTTP transport with the
+     *   callEndpoint signature; tests use it instead of a loopback server.
+     */
+    constructor(config, {transport} = {}) {
         super(config);
+        this.transport = transport ?? callEndpoint;
         this.baseUrl = config.baseUrl;
         this.apiKey = config.apiKey;
         this.model = config.model || 'llm-default';
@@ -426,7 +397,7 @@ export class OpenAIChatAdapter extends ProviderAdapter {
                 data: {request: requestCount, stream: this.stream}});
             let result;
             try {
-                result = await callEndpoint(url, req, this.apiKey, signal, progress => {
+                result = await this.transport(url, req, this.apiKey, signal, progress => {
                     emit({type: 'provider/progress', time: Date.now(),
                         data: {request: requestCount, ...progress}});
                 });
@@ -454,8 +425,8 @@ export class OpenAIChatAdapter extends ProviderAdapter {
                     throw new Error(`OpenAI response is not valid JSON: ${error.message}`);
                 }
             }
-            const usageEvents = this.buildUsageEvents(json);
-            for (const event of usageEvents) {
+            const usage = usageEvents(json, this.name, this.model);
+            for (const event of usage) {
                 allEvents.push(event);
                 emit(event);
             }
@@ -507,30 +478,6 @@ export class OpenAIChatAdapter extends ProviderAdapter {
                 });
             }
         }
-    }
-
-    buildUsageEvents(response) {
-        const usage = response.usage || {};
-        const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
-        const uncachedInput = (usage.prompt_tokens || 0) - cachedTokens;
-
-        return [{
-            type: 'assistant/message',
-            time: (response.created || Math.floor(Date.now() / 1000)) * 1000,
-            data: {
-                usage: {
-                    inputTokens: Math.max(0, uncachedInput),
-                    cacheReadTokens: cachedTokens,
-                    cacheWriteTokens: 0,
-                    outputTokens: usage.completion_tokens || 0,
-                    totalTokens: usage.total_tokens || 0
-                },
-                message: {
-                    id: response.id || genId('msg_'),
-                    source: {provider: this.name, model: response.model || this.model}
-                }
-            }
-        }];
     }
 }
 

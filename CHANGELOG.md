@@ -62,6 +62,17 @@ and uses semantic versioning for public releases.
   `protocol_error` and no longer replays `error.events` after a failed round.
   Tests use one shared fake Worker (`prototype/tests/fake-worker.mjs`) built from
   the same constructors instead of nine hand-written fakes
+- The Provider seam is real: the DSH SDK path is a second adapter
+  (`prototype/providers/dsh-sdk.mjs`) instead of a Worker branch, so the Worker
+  resolves one adapter from the task's Provider and never reads its type.
+  Adapters declare capabilities (reasoning effort, session continuity, runtime
+  patch and budget file); the manager asks for capabilities instead of naming
+  `dsh-sdk`, and the DSH adapter writes its own task patch. The openai-chat
+  tool loop runs on an injectable HTTP transport, the Worker tool set moved to
+  `src/worker/tools.mjs`, and dead helpers (`buildOpenAIRequest`,
+  `openaiToAnthropic`, `mapStopReason`, `estimateTokens`, `message.signal`) are
+  removed. `AdapterCache.closeAll()` releases every adapter a Worker built,
+  including one replaced by a Provider fallback
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and

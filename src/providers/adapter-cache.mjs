@@ -14,12 +14,15 @@ function providerKey(config) {
 /**
  * @param options.createAdapter - adapter factory, injectable for tests.
  * @param options.env - environment used to resolve `apiKeyEnv`.
+ * @param options.adapterOptions - constructor options passed to every adapter.
  */
 export function createAdapterCache({
   createAdapter = createDefaultAdapter,
   env = process.env,
+  adapterOptions = {},
 } = {}) {
   let cached = null;
+  const created = [];
 
   return {
     /**
@@ -38,8 +41,9 @@ export function createAdapterCache({
       }
       const key = providerKey(resolved);
       if (cached?.key === key) return cached.adapter;
-      const adapter = createAdapter(resolved);
+      const adapter = createAdapter(resolved, adapterOptions);
       adapter.validate?.();
+      created.push(adapter);
       cached = {key, adapter};
       return adapter;
     },
@@ -51,6 +55,23 @@ export function createAdapterCache({
 
     reset() {
       cached = null;
+    },
+
+    /**
+     * Close every adapter this process built, oldest first. A Provider
+     * fallback replaces the cached adapter, so the cache, not the current
+     * entry, owns teardown.
+     */
+    async closeAll() {
+      cached = null;
+      const owned = created.splice(0);
+      for (const adapter of owned.reverse()) {
+        try {
+          await adapter.close?.();
+        } catch {
+          // A failed close is not allowed to hide another adapter's teardown.
+        }
+      }
     },
   };
 }
