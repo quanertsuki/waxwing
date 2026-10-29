@@ -11,6 +11,7 @@ flowchart LR
   Gateway["Loopback HTTP gateway<br/>127.0.0.1 + bearer token"]
 
   subgraph Manager["Local manager: single state owner"]
+    Ops["Operation catalogue<br/>schema + entry policy + codes"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
     TaskCmd["TaskCommand<br/>create validation"]
     Rework["TaskRework<br/>eligibility + limits + override"]
@@ -42,7 +43,9 @@ flowchart LR
   CLI --> Gateway
   MCP --> Gateway
   Desktop --> Gateway
-
+  CLI -. schema .-> Ops
+  MCP -. schema .-> Ops
+  Gateway --> Ops
   Gateway --> TaskCmd
   Gateway --> Rework
   Gateway --> TaskView

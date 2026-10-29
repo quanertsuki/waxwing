@@ -34,6 +34,7 @@ import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
 import {TaskCommandModule} from '../src/tasks/command.mjs';
 import {TaskRework} from '../src/tasks/rework.mjs';
+import {validateOperation} from '../src/operations/catalogue.mjs';
 
 const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/');
 
@@ -855,10 +856,11 @@ export function createManager(options = {}) {
     });
     return executeRun(created.task, preflight.prompt, preflight.maxTokens, preflight.effort);
   }
-  async function action(name, a = {}) {
-    if (!a || typeof a !== 'object' || Array.isArray(a)) throw new Error('Arguments must be an object');
-    switch (name) {
-      case 'list': return [...repository.values()].map(t => {
+  // Handler table keyed by the operation catalogue. `action` owns the shared
+  // validation; a new operation adds its catalogue entry and one handler here.
+  const handlers = {
+    list() {
+      return [...repository.values()].map(t => {
         const snapshot = usageSnapshot(t);
         const item = compactTask(t, false, snapshot.listUsage);
         if (snapshot.statusUsage.limitState === 'blocked') item.limitBlocked = true;
@@ -866,88 +868,95 @@ export function createManager(options = {}) {
           snapshot.statusUsage.limitState === 'unavailable') item.limitWarning = true;
         return item;
       });
-      case 'status': {
-        const t = get(a.id), q = statusQuery(a);
-        if (q.view === 'summary') return statusSummary(t);
-        if (q.view === 'result') return resultPage(t, q.offset, q.limit);
-        if (q.view === 'usage') return usagePage(t, q.offset, q.limit);
-        if (q.view === 'report') return reportPage(t, q.offset, q.limit);
-        if (q.view === 'workspace') return workspacePage(t, q.offset, q.limit);
-        if (q.view === 'diff') return diffPage(t, q.offset, q.limit);
-        if (q.view === 'log') return logPage(t, q.offset, q.limit);
-        return historyPage(t, q.offset, q.limit);
-      }
-      case 'wait': return waitForTask(a);
-      case 'research_start': return research.start(a);
-      case 'research_status': return research.status(a.id);
-      case 'research_wait': return research.wait(a.id, {timeoutSeconds: a.timeoutSeconds});
-      case 'research_collect': return research.collect(a.id, {offset: a.offset, limit: a.limit});
-      case 'research_cancel': return research.cancel(a.id);
-      case 'create': return createTask(a);
-      case 'rework': {
-        const t = get(a.id);
-        // One read-only decision supplies the prompt, limits, and override
-        // event. The record change is applied only inside prepareRun's commit,
-        // so a gate failure leaves both task.json and events.jsonl unchanged.
-        const decision = rework.decide(t, a);
-        if (!decision.allowed) throw new Error(decision.reason);
-        return executeRun(t, decision.prompt, decision.maxTokens, decision.effort, {
-          configure: value => Object.assign(value, decision.record),
-          events: decision.event ? [decision.event] : [],
-        });
-      }
-      case 'cleanup_worktree': {
-        const t = get(a.id);
-        const {lease, ...result} = workspaceLeases.release({task: t, live: workers.live(t.id)});
-        commit({...t, workspaceLease: lease ?? t.workspaceLease}, [
-          {kind: 'worktree_cleaned', ...result},
-        ]);
-        return {id: t.id, ...result};
-      }
-      case 'cancel': return stop(a.id, false);
-      case 'close': return stop(a.id, true);
-      case 'accept': {
-        // Lifecycle first, then evidence: an illegal status must still report
-        // "Cannot accept task in ..." exactly as before.
-        const t = transition(get(a.id), 'accept');
-        const accepted = acceptance.acceptAndSave(t, {
-          evidence: a.evidence,
-          save,
-        });
-        const saved = commit(accepted, [{kind: 'accepted', evidence: a.evidence}]);
-        return statusSummary(saved);
-      }
-      case 'export': {
-        const t = get(a.id);
-        return acceptance.exportAndSave(t, {save});
-      }
-      case 'preview_delete': return deletionPreview(get(a.id));
-      case 'grant_delete': {
-        // This endpoint is intentionally omitted from the MCP tool catalogue.
-        // The trusted delegating party must obtain explicit human permission; the local OS account is the prototype trust boundary.
-        // The module requires the complete, exact task ID before it previews.
-        acceptance.assertConfirmation(a.id, a.confirmation);
-        const t = get(a.id);
-        return acceptance.grant(t, {
-          directory: directory(t.id),
-          live: workers.live(t.id),
-          confirmation: a.confirmation,
-        });
-      }
-      case 'delete': {
-        // Preview, archived-report hash, grant scope, and fingerprint equality
-        // are one decision inside the module; the manager only reaps records.
-        const t = get(a.id);
-        return acceptance.removeTaskAndForget(t, {
-          directory: directory(t.id),
-          live: workers.live(t.id),
-          forget: id => {
-            repository.delete(id);
-          },
-        });
-      }
-      default: throw new Error(`Unknown action: ${name}`);
-    }
+    },
+    status(a) {
+      const t = get(a.id), q = statusQuery(a);
+      if (q.view === 'summary') return statusSummary(t);
+      if (q.view === 'result') return resultPage(t, q.offset, q.limit);
+      if (q.view === 'usage') return usagePage(t, q.offset, q.limit);
+      if (q.view === 'report') return reportPage(t, q.offset, q.limit);
+      if (q.view === 'workspace') return workspacePage(t, q.offset, q.limit);
+      if (q.view === 'diff') return diffPage(t, q.offset, q.limit);
+      if (q.view === 'log') return logPage(t, q.offset, q.limit);
+      return historyPage(t, q.offset, q.limit);
+    },
+    wait: a => waitForTask(a),
+    research_start: a => research.start(a),
+    research_status: a => research.status(a.id),
+    research_wait: a => research.wait(a.id, {timeoutSeconds: a.timeoutSeconds}),
+    research_collect: a => research.collect(a.id, {offset: a.offset, limit: a.limit}),
+    research_cancel: a => research.cancel(a.id),
+    create: a => createTask(a),
+    rework(a) {
+      const t = get(a.id);
+      // One read-only decision supplies the prompt, limits, and override event.
+      // The record change is applied only inside prepareRun's commit, so a gate
+      // failure leaves both task.json and events.jsonl unchanged.
+      const decision = rework.decide(t, a);
+      if (!decision.allowed) throw new Error(decision.reason);
+      return executeRun(t, decision.prompt, decision.maxTokens, decision.effort, {
+        configure: value => Object.assign(value, decision.record),
+        events: decision.event ? [decision.event] : [],
+      });
+    },
+    cleanup_worktree(a) {
+      const t = get(a.id);
+      const {lease, ...result} = workspaceLeases.release({task: t, live: workers.live(t.id)});
+      commit({...t, workspaceLease: lease ?? t.workspaceLease}, [
+        {kind: 'worktree_cleaned', ...result},
+      ]);
+      return {id: t.id, ...result};
+    },
+    cancel: a => stop(a.id, false),
+    close: a => stop(a.id, true),
+    accept(a) {
+      // Lifecycle first, then evidence: an illegal status must still report
+      // "Cannot accept task in ..." exactly as before.
+      const t = transition(get(a.id), 'accept');
+      const accepted = acceptance.acceptAndSave(t, {
+        evidence: a.evidence,
+        save,
+      });
+      const saved = commit(accepted, [{kind: 'accepted', evidence: a.evidence}]);
+      return statusSummary(saved);
+    },
+    export(a) {
+      const t = get(a.id);
+      return acceptance.exportAndSave(t, {save});
+    },
+    preview_delete: a => deletionPreview(get(a.id)),
+    grant_delete(a) {
+      // This endpoint is intentionally omitted from the MCP tool catalogue.
+      // The trusted delegating party must obtain explicit human permission; the local OS account is the prototype trust boundary.
+      // The module requires the complete, exact task ID before it previews.
+      acceptance.assertConfirmation(a.id, a.confirmation);
+      const t = get(a.id);
+      return acceptance.grant(t, {
+        directory: directory(t.id),
+        live: workers.live(t.id),
+        confirmation: a.confirmation,
+      });
+    },
+    delete(a) {
+      // Preview, archived-report hash, grant scope, and fingerprint equality
+      // are one decision inside the module; the manager only reaps records.
+      const t = get(a.id);
+      return acceptance.removeTaskAndForget(t, {
+        directory: directory(t.id),
+        live: workers.live(t.id),
+        forget: id => {
+          repository.delete(id);
+        },
+      });
+    },
+  };
+  async function action(name, a = {}) {
+    // Shape, unknown fields, bounds, and operation-specific rules come from the
+    // shared catalogue; handlers only add ordering and domain policy.
+    a = validateOperation(name, a);
+    const handler = handlers[name];
+    if (!handler) throw new Error(`Unknown action: ${name}`);
+    return handler(a);
   }
   async function shutdown() {
     if (shuttingDown) return; shuttingDown = true;

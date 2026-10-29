@@ -35,6 +35,15 @@ and uses semantic versioning for public releases.
   repeated failure only updates `error` and records its event.
   `RuntimeSupervisor`, `RuntimeLifecycle`, and `RuntimeOutcomeSettlement` remain
   as deprecated facades until 0.3.0; `close-outcome.mjs` is removed
+- The manager, CLI, and MCP now share one operation catalogue: each operation
+  declares its fields, bounds, defaults, entry exposure, annotations, and
+  cross-field rules, so CLI parsing, help text, MCP tool schemas, and manager
+  validation cannot drift. `wait` keeps its MCP-only 300-second ceiling, CLI
+  JSON commands are validated like MCP, and the HTTP gateway exports a testable
+  `createGateway`. Failures keep the existing `error` text and add a stable
+  status/`code` (`INVALID_ARGUMENT`, `NOT_FOUND`, `CONFLICT`,
+  `REQUEST_TOO_LARGE`, and so on); `grant_delete` is marked human-only and
+  stays out of the MCP catalogue
 - Rework eligibility, next-round limits, and the one-round override are one
   read-only `TaskRework` decision shared by the rework action and status
   summaries. Lifecycle, runtime, round, and workspace refusals are answered

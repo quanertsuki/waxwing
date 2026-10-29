@@ -157,3 +157,20 @@
 - 完整测试：`311/311` 通过，43 个测试文件。
 - 发布树：`261` 个文件通过。
 - 遗留：`TaskCommandModule` 是 `src/app.mjs` 的公开导出，删除其 rework 方法属于公开类的方法级变更，已在 CHANGELOG 记录；如需保留旧方法，需在 0.3.0 前加弃用转发。
+
+### 阶段 3：P1 接口面
+
+#### #9 操作目录：一份定义驱动网关、CLI、MCP
+
+状态：完成。
+
+- 新增 `src/operations/catalogue.mjs`：20 个操作（含 `health`/`shutdown`/`grant_delete`）声明字段、上下限、默认值、入口暴露（CLI/MCP/桌面/仅人工）、注解和跨字段规则；`validateOperation`、`mcpSchema`、`parseCliOperation`、`cliHelp` 都从这张表生成。
+- `prototype/manager.mjs`：`action()` 先按目录统一校验，再通过按操作名索引的 handler 表分发；删除 20 个 case 的 `switch`。新增操作只需目录项和处理函数。
+- `prototype/cli.mjs`：`HELP_TEXT`、`parseCommandArgs`、`parseStatusArgs`、`parseWaitArgs`、`parseResearchCollectArgs` 全部委托目录；JSON 命令（create/rework/accept/research-start）现在和 MCP 一样校验未知字段、类型、上下限。CLI 仍拒绝没有分页视图的 offset/limit，该差异写在 status 的 CLI 入口上；wait 默认仍为 `roundTimeoutSeconds + 30`，上限 86400。
+- `prototype/mcp.mjs`：工具目录、schema、注解和调用校验都由目录生成；`wait`/`research_wait` 的 MCP 上限 300 是目录里的入口覆盖；`grant_delete` 标记仅人工，不出现在 MCP 目录。错误结果新增 `code` 字段，文本不变。
+- `prototype/server.mjs`：导出 `createGateway`（可注入 manager、端口、token），顶层只在直接运行时启动；错误按 `classifyError` 映射状态码和稳定 `code`，响应保留 `{error}` 文本。`prototype/common.mjs` 的 `request` 把 `code`/`status` 挂到 Error 上。
+- `desktop/src-tauri/src/transport.rs`：新增 `error_code` 解析响应里的稳定 `code`，`error_message` 文本不变。
+- 目标测试：新增 `operations.test.mjs` 4 项——网关未授权/Host/Origin/1 MB/未知操作/未知任务/非法状态的状态码与 code；CLI、MCP、manager 对合法与非法请求的一致校验；入口差异（MCP wait 300、CLI 分页视图、human-only 不在 MCP 目录）；网关保留 OperationError 的 code/status。现有 `cli.test.mjs`、`mcp.test.mjs` 通过目录生成的解析与 schema 继续通过。
+- 完整测试：`315/315` 通过，44 个测试文件。
+- 发布树：`263` 个文件通过。
+- 遗留：`src/app.mjs` 尚未导出目录（`prototype/` 是它的两个调用方）；`grant_delete` 是否对网关调用方额外限制，仍需权儿决定。

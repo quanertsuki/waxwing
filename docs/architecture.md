@@ -12,9 +12,10 @@ interface.
 | Module | Responsibility |
 | --- | --- |
 | `src/app.mjs` | Public composition root and stable exports |
+| `src/operations/catalogue.mjs` | One operation table: fields, defaults, bounds, entry exposure, annotations, shared validation, CLI parsing, and stable error codes used by the manager, CLI, MCP, and HTTP gateway |
 | `src/storage/durable-file.mjs` | Atomic text/JSON writes with transient-rename retry, replace-with-backup transactions, and the shared SHA-256 |
-| `src/adapters/cli.mjs` | CLI adapter; forwards no task-state mutations itself |
-| `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases |
+| `src/adapters/cli.mjs` | CLI adapter; command parsing and help are generated from the operation catalogue |
+| `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases; tool schemas come from the operation catalogue |
 | `src/tasks/repository.mjs` | Task index, deeply frozen records, atomic `task.json`, and the single commit path: save the record, then append events with the next monotonic sequence |
 | `src/tasks/lifecycle.mjs` | Legal task-status transitions |
 | `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation, and the round-start record+event commit |
@@ -56,6 +57,15 @@ The release safety net discovers its inputs instead of listing them: the test
 runner imports every `prototype/tests/*.test.mjs`, the release check requires
 every `src/**/*.mjs`, and the portable desktop backend copies exactly the
 `prototype/` files `package.json` publishes.
+
+The operation catalogue is the single source for the loopback gateway, CLI, and
+MCP tool surface. It declares each operation's fields, bounds, defaults, entry
+exposure, annotations, and cross-field rules; the manager validates and
+dispatches from it, the CLI parses and prints help from it, and MCP renders its
+tool schema from it. Entry-specific differences such as MCP's shorter `wait`
+ceiling stay in the catalogue entry. HTTP failures keep their existing `error`
+text and add a stable `code` (`INVALID_ARGUMENT`, `NOT_FOUND`, `CONFLICT`, and
+so on) plus the matching status.
 
 ## System view
 

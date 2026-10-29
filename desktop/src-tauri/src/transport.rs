@@ -21,6 +21,18 @@ pub enum ManagerHealth {
 struct ErrorBody {
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    code: Option<String>,
+}
+
+/// Stable machine-readable code from a manager error body, when present.
+#[allow(dead_code)]
+pub fn error_code(_status: u16, body: &str) -> Option<String> {
+    serde_json::from_str::<ErrorBody>(body)
+        .ok()
+        .and_then(|parsed| parsed.code)
+        .filter(|code| !code.is_empty())
 }
 
 /// Clamp a requested page limit to the range the manager accepts. Missing or
@@ -87,6 +99,16 @@ mod tests {
             error_message(400, r#"{"error":"task is still running"}"#),
             "Manager error (HTTP 400): task is still running"
         );
+    }
+
+    #[test]
+    fn error_body_exposes_the_stable_code() {
+        assert_eq!(
+            error_code(404, r#"{"error":"Unknown task","code":"NOT_FOUND"}"#),
+            Some("NOT_FOUND".to_string())
+        );
+        assert_eq!(error_code(400, r#"{"error":"old body"}"#), None);
+        assert_eq!(error_code(400, "not json"), None);
     }
 
     #[test]

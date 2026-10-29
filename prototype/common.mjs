@@ -142,6 +142,11 @@ export async function request(action, args={}, options={}) {
   // record legitimately carries a historical `error` field (for example after
   // a round exhausted a small output budget); treating that as a failed call
   // would block the delegating party from viewing or reworking such a task.
-  if (!r.ok) throw new Error(value.error ?? `HTTP ${r.status}`);
+  if (!r.ok) {
+    const error = new Error(value.error ?? `HTTP ${r.status}`);
+    error.code = value.code ?? null;
+    error.status = r.status;
+    throw error;
+  }
   return value;
 }

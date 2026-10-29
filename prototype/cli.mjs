@@ -6,35 +6,18 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {ensureServer,request} from './client.mjs';
 import {config,HERE,cleanEnvironment} from './common.mjs';
+import {cliHelp,parseCliOperation} from '../src/operations/catalogue.mjs';
 
 const out=value=>console.log(JSON.stringify(value,null,2));
 export const WAIT_INITIAL_MS=1000, WAIT_MAX_MS=10000, WAIT_GRACE_MS=30000;
 export const waitTimeoutMs=()=>config.roundTimeoutSeconds*1000+WAIT_GRACE_MS;
 export const nextWaitDelay=previous=>Math.min(previous*2,WAIT_MAX_MS);
-export const HELP_TEXT=(
-  'waxwing [tui | demo | health | list | status ID [--view summary|result|history|usage|report|workspace|diff|log] [--offset N --limit N] | wait ID [--timeout N] | ' +
-  'research-start JSON | research-status BATCH_ID | research-wait BATCH_ID [--timeout N] | research-collect BATCH_ID [--offset N --limit N] | research-cancel BATCH_ID | ' +
-  'create JSON | rework JSON | accept JSON | cancel ID | close ID | cleanup-worktree ID | export ID | preview-delete ID | grant-delete ID | delete ID | shutdown]\n' +
-  'JSON 参数也可用 @绝对文件路径。create/rework 可选数值 maxTokens（正安全整数，单次请求输出上限；rework 省略则继承上一轮预算，下一轮生效）。' +
-  'create/rework 可选 effort high|max（推理强度，默认 high；rework 省略则继承任务当前值，下一轮生效；反复失败时可升到 max）。' +
-  'create 可选 usageLimits 对象（enabled、warnCostCny、blockCostCny、warnRequests、blockRequests；默认关闭，只统计；省略字段继承全局配置）；' +
-  'rework 亦可传 usageLimits 调整后续轮次上限。主动启用并达到上限时，rework 需要 overrideLimits:true 和非空 overrideReason（最多 1000 字符）。' +
-  '默认 list/status/变更操作返回有界摘要；完整结果用 status --view result，完整历史用 --view history，用量与费用明细用 --view usage，均可用 offset/limit 分页读取。' +
-  'create 可选 workspaceMode auto|worktree|shared；auto 对干净 Git 仓库创建隔离 worktree，对非 Git 目录使用共享锁，脏仓库必须显式选择 shared。' +
-  'wait/research-wait 在管理器内阻塞等待，默认截止时间为 roundTimeoutSeconds + 30 秒，可用 --timeout 调整。MCP：waxwing-mcp 或 node prototype/mcp.mjs'
-);
+// Help and argument rules are generated from the shared operation catalogue.
+export const HELP_TEXT=cliHelp();
 
-/**
- * Parse create/rework/accept JSON (inline or @file) and route ID arguments.
- * The CLI deliberately does not filter the object: the manager validates every
- * new field again, including when the HTTP surface is called directly.
- */
+/** Parse create/rework/accept JSON (inline or @file) from the catalogue. */
 export function parseCommandArgs(command,args) {
-  if(['create','rework','accept','research_start'].includes(command)) {
-    const value=args.join(' ');
-    return {command,data:JSON.parse(value.startsWith('@')?fs.readFileSync(value.slice(1),'utf8'):value)};
-  }
-  return {command,data:args[0]?{id:args[0]}:{}};
+  return parseCliOperation(command,args);
 }
 
 /**
@@ -51,76 +34,17 @@ export async function wait(id,options={}) {
 
 /** Parse `wait ID [--timeout SECONDS]` for task and research waits. */
 export function parseWaitArgs(args,label='wait') {
-  const [id,...rest]=args;
-  if(!id)throw new Error(`${label} requires an ID`);
-  const data={id};
-  for(let i=0;i<rest.length;i++) {
-    const token=rest[i],eq=token.indexOf('='),name=token.slice(2,eq<0?undefined:eq);
-    if(!token.startsWith('--'))throw new Error(`Unexpected ${label} argument ${token}`);
-    if(name!=='timeout')throw new Error(`Unknown ${label} option --${name}`);
-    if(data.timeoutSeconds!==undefined)throw new Error(`Duplicate ${label} option --timeout`);
-    let value;
-    if(eq>=0)value=token.slice(eq+1);
-    else {
-      if(i+1>=rest.length)throw new Error('Missing value for --timeout');
-      value=rest[++i];
-    }
-    if(!/^\d+$/.test(value))throw new Error('timeout must be a positive integer');
-    const seconds=Number(value);
-    if(!Number.isSafeInteger(seconds)||seconds<1||seconds>86400) {
-      throw new Error('timeout must be an integer between 1 and 86400 seconds');
-    }
-    data.timeoutSeconds=seconds;
-  }
-  return data;
+  return parseCliOperation(label,args).data;
 }
 
-/** Parse `status ID [--view summary|result|history|usage] [--offset N --limit N]`. */
+/** Parse `status ID [--view ...] [--offset N --limit N]`. */
 export function parseStatusArgs(args) {
-  const [id,...rest]=args;
-  if(!id)throw new Error('status requires a task ID');
-  const data={id}, seen=new Set();
-  const allowedViews=['summary','result','history','usage','report','workspace','diff','log'];
-  for(let i=0;i<rest.length;i++) {
-    const token=rest[i];
-    if(!token.startsWith('--'))throw new Error(`Unexpected status argument ${token}`);
-    const eq=token.indexOf('='), name=token.slice(2,eq<0?undefined:eq);
-    if(!['view','offset','limit'].includes(name))throw new Error(`Unknown status option --${name}`);
-    if(seen.has(name))throw new Error(`Duplicate status option --${name}`);
-    seen.add(name);
-    let value;
-    if(eq>=0)value=token.slice(eq+1);
-    else {
-      if(i+1>=rest.length)throw new Error(`Missing value for --${name}`);
-      value=rest[++i];
-    }
-    if(name==='view') {
-      if(!allowedViews.includes(value))throw new Error(`view must be one of ${allowedViews.join(', ')}`);
-      data.view=value;
-    } else if(name==='offset') {
-      if(!/^\d+$/.test(value))throw new Error('offset must be a non-negative integer');
-      const n=Number(value);
-      if(!Number.isSafeInteger(n))throw new Error('offset must be a non-negative safe integer');
-      data.offset=n;
-    } else {
-      if(!/^\d+$/.test(value))throw new Error('limit must be an integer between 1 and 4000');
-      const n=Number(value);
-      if(!Number.isSafeInteger(n)||n<1||n>4000)throw new Error('limit must be an integer between 1 and 4000');
-      data.limit=n;
-    }
-  }
-  if((data.offset!==undefined||data.limit!==undefined)&&!['result','history','usage','report','workspace','diff','log'].includes(data.view)) {
-    throw new Error('--offset/--limit require --view result, history, usage, report, workspace, diff, or log');
-  }
-  return data;
+  return parseCliOperation('status',args).data;
 }
+
 /** Parse `research-collect BATCH_ID [--offset N --limit N]`. */
 export function parseResearchCollectArgs(args) {
-  const [id,...rest]=args;
-  if(!id)throw new Error('research-collect requires a batch ID');
-  const parsed=parseStatusArgs([id,'--view','result',...rest]);
-  const {view,...data}=parsed;
-  return data;
+  return parseCliOperation('research-collect',args).data;
 }
 async function authorize(id,rl) {
   const preview=await request('preview_delete',{id});out(preview);
@@ -202,26 +126,26 @@ export async function main() {
   if(!command || command==='tui'){await tui();return;}
   if(command==='demo'){await demo();return;}
   if(command==='wait') {
-    const data=parseWaitArgs(args);
+    const {data}=parseCliOperation('wait',args);
     out(await wait(data.id,{timeoutSeconds:data.timeoutSeconds}));
     return;
   }
-  if(command==='status'){out(await request('status',parseStatusArgs(args)));return;}
+  if(command==='status'){out(await request('status',parseCliOperation('status',args).data));return;}
   if(command==='research-wait') {
-    const data=parseWaitArgs(args,'research-wait');
+    const {data}=parseCliOperation('research-wait',args);
     out(await request('research_wait',{
       ...data,
       timeoutSeconds:data.timeoutSeconds ?? Math.max(1,Math.ceil(waitTimeoutMs()/1000)),
     }));
     return;
   }
-  if(command==='research-collect'){out(await request('research_collect',parseResearchCollectArgs(args)));return;}
-  if(command==='cleanup-worktree'){if(!args[0])throw new Error('cleanup-worktree requires a task ID');out(await request('cleanup_worktree',{id:args[0]}));return;}
+  if(command==='research-collect'){out(await request('research_collect',parseCliOperation('research-collect',args).data));return;}
   if(command==='grant-delete') {
+    const {data}=parseCliOperation('grant-delete',args);
     const rl=readline.createInterface({input:stdin,output:stdout});
-    try{out(await authorize(args[0],rl));}finally{rl.close();}return;
+    try{out(await authorize(data.id,rl));}finally{rl.close();}return;
   }
-  const parsed=parseCommandArgs(command.replaceAll('-','_'),args);
+  const parsed=parseCliOperation(command,args);
   out(await request(parsed.command,parsed.data));
 }
 // Importing this module for tests must not start the CLI. Match mcp.mjs.
