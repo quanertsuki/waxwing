@@ -23,10 +23,11 @@ function deepFreeze(value) {
  *     restart cannot reuse or reorder a number.
  */
 export class TaskRepository {
-  constructor({runsDir, atomicJson, now = () => new Date().toISOString()}) {
+  constructor({runsDir, atomicJson, now = () => new Date().toISOString(), fs: files = fs}) {
     this.runsDir = path.resolve(runsDir);
     this.atomicJson = atomicJson;
     this.now = now;
+    this.fs = files;
     this.records = new Map();
     this.sequences = new Map();
   }
@@ -34,7 +35,7 @@ export class TaskRepository {
   directory(id) {
     if (!TASK_ID.test(id)) throw new Error('Invalid task ID');
     const value = path.join(this.runsDir, id);
-    if (fs.existsSync(value) && fs.realpathSync(value) !== value) {
+    if (this.fs.existsSync(value) && this.fs.realpathSync(value) !== value) {
       throw new Error('Linked task directory refused');
     }
     return value;
@@ -104,7 +105,7 @@ export class TaskRepository {
           ...(roundId && payload?.roundId === undefined ? {roundId} : {}),
           ...payload,
         };
-        fs.appendFileSync(journal, `${JSON.stringify(record)}\n`);
+        this.fs.appendFileSync(journal, `${JSON.stringify(record)}\n`);
       });
     }
     return next;
@@ -122,13 +123,13 @@ export class TaskRepository {
    * overwrite another task.
    */
   restore() {
-    if (!fs.existsSync(this.runsDir)) return [];
+    if (!this.fs.existsSync(this.runsDir)) return [];
     const restored = [];
-    for (const name of fs.readdirSync(this.runsDir)) {
+    for (const name of this.fs.readdirSync(this.runsDir)) {
       if (!TASK_ID.test(name)) continue;
       const directory = this.directory(name);
       const file = path.join(directory, 'task.json');
-      const task = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const task = JSON.parse(this.fs.readFileSync(file, 'utf8'));
       if (task.id !== name) throw new Error(`Task ID mismatch in ${file}`);
       task.schemaVersion = 2;
       if (!task.workspaceLease) {
@@ -141,7 +142,7 @@ export class TaskRepository {
         task.sourceWorkspace = task.workspace;
       }
       if (!Number.isSafeInteger(task.eventSequence)) {
-        task.eventSequence = lastEventSequence(path.join(directory, 'events.jsonl'));
+        task.eventSequence = lastEventSequence(path.join(directory, 'events.jsonl'), this.fs);
       }
       this.records.set(name, deepFreeze(task));
       this.sequences.set(name, task.eventSequence);
@@ -151,9 +152,9 @@ export class TaskRepository {
   }
 }
 
-function lastEventSequence(file) {
+function lastEventSequence(file, files = fs) {
   try {
-    const lines = fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
+    const lines = files.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean);
     const last = lines.length ? JSON.parse(lines.at(-1)) : null;
     return Number.isSafeInteger(last?.sequence) ? last.sequence : lines.length;
   } catch {

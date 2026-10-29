@@ -15,7 +15,8 @@ import {
 import {managerPaths} from '../../src/config/paths.mjs';
 import {operationByName} from '../../src/operations/catalogue.mjs';
 import {createManager} from '../manager.mjs';
-import {config} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const config=runtimeContext().config;
 import {createFakeWorker} from './fake-worker.mjs';
 
 function root() {

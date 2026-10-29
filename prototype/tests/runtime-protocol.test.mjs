@@ -8,7 +8,10 @@ import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {config,ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const ROOT=runtimeContext().root;
+// Test-owned configuration: mutations affect only this manager instance.
+const config={...runtimeContext().config};
 
 const samePath=(a,b)=>{
   const left=path.resolve(a),right=path.resolve(b);
@@ -110,7 +113,7 @@ function handleRun(message,worker,reply) {
   setImmediate(()=>entry.release?.());
 }
 
-const manager=createManager({forkWorker});
+const manager=createManager({forkWorker,config});
 after(()=>manager.shutdown());
 const newWorkspace=()=>{
   const dir=path.join(base,`ws-${++workspaceCounter}`);

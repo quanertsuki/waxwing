@@ -2,7 +2,7 @@
 // and HTTP endpoint before the manager exists. This is the only resolution the
 // desktop backend consumes: it asks the CLI once instead of reading config.
 import path from 'node:path';
-import {loadConfiguration} from '../../prototype/config.mjs';
+import {loadConfiguration} from './load.mjs';
 
 /**
  * Resolve everything a launcher needs from one configuration load.

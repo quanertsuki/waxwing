@@ -7,7 +7,8 @@ import path from 'node:path';
 import {createFakeWorker} from './fake-worker.mjs';
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const ROOT=runtimeContext().root;
 
 if (path.resolve(ROOT) === path.resolve(REAL_ROOT)) throw new Error(`research tests refused live root ${ROOT}`);
 if (path.resolve(ROOT) !== path.resolve(TEST_ROOT)) throw new Error(`research tests refused non-isolated root ${ROOT}`);

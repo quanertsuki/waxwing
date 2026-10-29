@@ -8,7 +8,8 @@ import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before common.mjs or manager.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
-import {ROOT,config} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {root:ROOT,config}=runtimeContext();
 import {usageForList,usageForStatus,usageForTask,usageForView} from '../usage.mjs';
 import {createManager} from '../manager.mjs';
 import {UsageModule} from '../../src/usage/module.mjs';

@@ -3,7 +3,7 @@
 // results. The Worker never branches on a provider type: the registry resolves
 // the adapter, and the adapter's capabilities decide what a round receives.
 
-import {config} from './common.mjs';
+import {getConfig} from './common.mjs';
 import {assertMaxTokens} from './budget.mjs';
 import {parseOptionalEffort} from './effort.mjs';
 import {createAdapterCache} from '../src/providers/adapter-cache.mjs';
@@ -27,8 +27,10 @@ import {
 
 let busy = false, closing = false;
 // Keyed by the current round's Provider: a fallback in the same Worker process
-// must not keep calling the Provider that just failed.
-const adapters = createAdapterCache({adapterOptions: {dshRepo: config.dshRepo}});
+// must not keep calling the Provider that just failed. The cache is built on
+// first use so importing this process's helpers never reads configuration.
+let adapters = null;
+const adapterCache = () => adapters ??= createAdapterCache({adapterOptions: {dshRepo: getConfig().dshRepo}});
 let activeAbort = null;
 let closeFinished = false;
 
@@ -47,7 +49,7 @@ async function finishClose() {
     closeFinished = true;
     activeAbort?.abort();
     try {
-        await adapters.closeAll();
+        await adapters?.closeAll();
         send(closedMessage());
     } catch (e) {
         send(closeErrorMessage({error: String(e.message)}));
@@ -92,7 +94,7 @@ process.on('message', async message => {
         channel.send('ack', ackMessage());
         const task = message.task;
         const maxTokens = assertMaxTokens(
-            message.maxTokens ?? task?.maxTokens ?? config.maxTokens,
+            message.maxTokens ?? task?.maxTokens ?? getConfig().maxTokens,
             'round maxTokens'
         );
         const rawEffort = message.effort !== undefined ? message.effort : task?.effort;
@@ -101,8 +103,8 @@ process.on('message', async message => {
             : parseOptionalEffort(rawEffort, 'round effort');
 
         const provider = task?.provider
-            ?? resolveProvider(config.providersDir, DEFAULT_PROVIDER_NAME, {model: config.model});
-        const adapter = adapters.adapterFor(provider);
+            ?? resolveProvider(getConfig().providersDir, DEFAULT_PROVIDER_NAME, {model: getConfig().model});
+        const adapter = adapterCache().adapterFor(provider);
         const capabilities = adapter.capabilities ?? {};
         const controller = new AbortController();
         activeAbort = controller;

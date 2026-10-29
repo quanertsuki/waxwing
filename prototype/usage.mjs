@@ -3,7 +3,7 @@
 // 0.1 call shape (task + directory, global configuration) working until the
 // compatibility layer is removed.
 import path from 'node:path';
-import {HERE, config} from './common.mjs';
+import {HERE, getConfig} from './common.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
 
 export {
@@ -13,6 +13,7 @@ export {
 } from '../src/usage/metrics.mjs';
 
 function legacyModule() {
+    const config = getConfig();
     return new UsageModule({
         configuration: {
             limits: config.usageLimits,

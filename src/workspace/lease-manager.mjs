@@ -8,7 +8,7 @@ import {
   removeWorktree,
   rollbackWorktree,
 } from './git.mjs';
-import {pathsOverlap} from '../../prototype/common.mjs';
+import {pathsOverlap} from '../paths/path-utils.mjs';
 
 const MODES = new Set(['auto', 'worktree', 'shared']);
 const DEFAULT_GIT = {

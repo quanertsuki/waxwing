@@ -10,7 +10,8 @@ import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before manager.mjs/common.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {config,ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {config,root:ROOT}=runtimeContext();
 
 const samePath=(a,b)=>{const left=path.resolve(a),right=path.resolve(b);return process.platform==='win32'?left.toLowerCase()===right.toLowerCase():left===right;};
 if(samePath(ROOT,REAL_ROOT)) throw new Error(`compact tests refused: common ROOT points at the live root (${ROOT})`);

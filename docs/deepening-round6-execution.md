@@ -254,3 +254,24 @@
 - 完整测试：`360/360` 通过，48 个测试文件。
 - 发布树：`281` 个文件通过。Rust `cargo test --locked` 19/19。
 - 遗留：`desktop/src-tauri/src/tasks.rs` 仍自行解释任务视图字段（以 fixture 双向比对约束）；若要彻底单一来源，可让桌面直接消费生成的 JSON Schema，属后续工作。
+
+#### #15 Manager 组装：去掉导入期副作用，依赖可注入
+
+状态：完成（按计划允许的范围）。
+
+- 新增 `src/config/load.mjs`：配置分层（`config.json`、本地覆盖、环境别名）从 `prototype/config.mjs` 迁入，增加 `platform` 参数，导入时不读文件；`prototype/config.mjs` 改为转发。
+- 新增 `src/config/context.mjs`：`createRuntimeContext({here, env, platform})` 返回冻结的上下文（配置、配置路径、数据根、runs/reports/runtime/research/providers/pricing/node/port）；`runtimeContext()` 懒加载进程默认上下文，`getConfig()` 供兼容入口使用。`src/config/paths.mjs`、`service.mjs` 改从新模块导入。
+- 新增 `src/config/data-root.mjs`：`migrateLegacyData` 与 `ensureDataDirs(context)`，旧数据一次性复制保持原语义。
+- 新增 `src/paths/path-utils.mjs`：路径比较函数迁入 `src/`，`src/workspace/git.mjs`、`lease-manager.mjs` 不再导入 `prototype/`。
+- `prototype/common.mjs` 改为兼容外观：不再在导入时加载配置，不再导出可变的 `config`/`ROOT`/`RUNS`/`REPORTS`/`RUNTIME`；保留 `HERE`、`atomicJson`、`ensureDirs`、路径工具与客户端转出。
+- `prototype/manager.mjs`：`createManager({context, config, forkWorker, fs, clock, git, terminateRuntime, configurationService})`。所有 `config`、`ROOT`、`RUNS`、`REPORTS`、`RUNTIME`、`HERE` 改为上下文局部值；`usageLimits` 不再写回配置；`createdAt`/`updatedAt` 使用注入时钟；文件操作走注入的 `fs`；`WorkspaceLeaseManager` 收到 `git` 选项（此前遗漏）；`TaskRepository` 新增 `fs` 选项，`AcceptanceService` 收到 `now`。
+- 杀进程只剩一条路径：`TaskTransaction` 的强制退出改为调用 `terminateVerifiedRuntime({taskId, pid, ownerMarker})`，与恢复路径共用同一函数；身份无法验证且进程仍存活时明确报错，进程已消失时视为无需终止。删除 manager 里直连 `taskkill`/`SIGKILL` 的分支。
+- 实现迁入 `src/`、`prototype/` 转发：CLI（`src/adapters/cli.mjs`）、MCP（`src/adapters/mcp.mjs`）、回环客户端（`src/adapters/client.mjs`）、Provider registry 与三个 adapter（`src/providers/adapters/`）、DSH budget plugin（`src/providers/budget-plugin.mjs`）、budget/effort（`src/tasks/`）。`prototype/cli.mjs`、`prototype/mcp.mjs` 保留入口判断，`node prototype/...`、`bin/` 和 `package.json` 的 exports 路径不变。
+- `prototype/server.mjs`：`createGateway` 接受上下文；修复 `listen` 用未解析的 `port`（`start()` 不传端口时绑定随机端口）的问题，改为 `boundPort`；token、daemon.json 与健康响应都来自同一上下文。
+- `prototype/worker.mjs`：adapter 缓存与配置读取改为首次使用时执行，导入 worker 不再读配置。
+- 删除 `prototype/state.mjs`（无导入者，仅出现在发布清单，随文件删除自动消失）。
+- 测试：`runtime-protocol`、`reliability`、`execution-limits` 改用测试自己的配置对象并传给 `createManager`，不再改写共享全局配置；其余测试改为从 `runtimeContext()` 取根目录和配置。
+- 目标测试：新增 `manager-assembly.test.mjs` 3 项——同一进程内两个不同数据根的 manager 任务互不可见、文件互不写入；注入的时钟、文件系统、git 确实被使用（`createdAt` 等于固定时钟，`mkdirSync` 被调用，worktree 走注入实现）；默认上下文与配置被冻结。
+- 完整测试：`363/363` 通过，49 个测试文件。
+- 发布树：`292` 个文件通过；`package:smoke` 通过；Rust `cargo test --locked` 19/19。
+- 遗留：`src/usage/service.mjs` 仍导入 `prototype/usage.mjs`，随兼容层在 0.3.0 一起删除。`server.mjs`、`worker.mjs`、`manager.mjs` 仍在 `prototype/`（进程入口与组装处）；Worker 仍自行加载配置中的 providersDir/model，而不是从 manager 接收，跨上下文运行真实 Worker 时这一点仍需后续处理。

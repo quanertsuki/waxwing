@@ -4,11 +4,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {fork, spawn} from 'node:child_process';
-import {once} from 'node:events';
-import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnvironment,
-  canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath,
-  CONFIG_PATH,LOCAL_CONFIG_PATH,LOCAL_CONFIG_SOURCE} from './common.mjs';
+import {fork} from 'node:child_process';
+import {atomicJson,cleanEnvironment,runtimeContext,
+  canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath} from './common.mjs';
+import {ensureDataDirs} from '../src/config/data-root.mjs';
 import {ACTIVE_TASK_STATUSES, transition} from '../src/tasks/lifecycle.mjs';
 import {budgetFileFor, resolveRoundBudget} from './budget.mjs';
 import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
@@ -102,8 +101,23 @@ function parseWaitSeconds(value) {
  * @returns the action dispatcher and lifecycle helpers.
  */
 export function createManager(options = {}) {
-  ensureDirs();
-  const repository = new TaskRepository({runsDir: RUNS, atomicJson});
+  // The assembly point decides the data root, configuration, and platform
+  // dependencies. Two managers built with different contexts share no state.
+  const context = options.context ?? runtimeContext();
+  // A test or embedded caller may pass its own configuration object and keep
+  // updating it; the shared default config is frozen and never mutated.
+  const config = options.config ?? context.config;
+  const {here: HERE, root: ROOT, runsDir: RUNS, reportsDir: REPORTS, runtimeDir: RUNTIME} = context;
+  const fileSystem = options.fs ?? fs;
+  const clock = options.clock ?? {now: () => new Date()};
+  const now = () => clock.now().toISOString();
+  const terminateRuntime = options.terminateRuntime ?? (record => terminateVerifiedRuntime(record));
+  ensureDataDirs(context);
+  // UsageModule keeps the limit object it was constructed with, so make sure a
+  // configuration without limits still yields one stable object.
+  const usageLimits = config.usageLimits && typeof config.usageLimits === 'object'
+    && !Array.isArray(config.usageLimits) ? config.usageLimits : {};
+  const repository = new TaskRepository({runsDir: RUNS, atomicJson, now, fs: fileSystem});
   const executionPolicy = new ExecutionPolicy({
     configuration: () => config.executionPolicy,
     baseDirectory: HERE,
@@ -114,10 +128,12 @@ export function createManager(options = {}) {
   const acceptance = new AcceptanceService({
     reportsDir: REPORTS,
     grantsDir: RUNTIME,
+    now,
     policySection: task => executionPolicy.reportSection(task),
   });
   const taskChanges = new ChangeNotifier();
   const workspaceLeases = new WorkspaceLeaseManager({
+    git: options.git,
     defaultMode: config.workspaceMode ?? 'auto',
     worktreeContainerName: config.worktreeContainerName
       ?? config.worktreeParentName
@@ -154,21 +170,16 @@ export function createManager(options = {}) {
   });
   let shuttingDown = false;
 
-  // UsageModule keeps the limit object it was constructed with, so make sure a
-  // configuration without limits still yields one stable object.
-  if (!config.usageLimits || typeof config.usageLimits !== 'object' || Array.isArray(config.usageLimits)) {
-    config.usageLimits = {};
-  }
   const configurationService = options.configurationService ?? new ConfigurationService({
     config,
-    configPath: CONFIG_PATH,
-    localConfigPath: LOCAL_CONFIG_PATH,
-    localConfigSource: LOCAL_CONFIG_SOURCE,
+    configPath: context.configPath,
+    localConfigPath: context.localConfigPath,
+    localConfigSource: context.localConfigSource,
   });
 
   const usageModule = new UsageModule({
     configuration: {
-      limits: config.usageLimits,
+      limits: usageLimits,
       providersDir: config.providersDir,
       pricingFile: path.join(HERE, 'pricing.json'),
     },
@@ -259,10 +270,10 @@ export function createManager(options = {}) {
     if (typeof value !== 'string' || !value.trim()) throw new Error('Workspace path required');
     const resolved = path.resolve(value);
     let real;
-    try { real = fs.realpathSync(resolved); }
+    try { real = fileSystem.realpathSync(resolved); }
     catch { throw new Error(`Workspace does not exist or is inaccessible: ${value}`); }
     let stat;
-    try { stat = fs.statSync(real); }
+    try { stat = fileSystem.statSync(real); }
     catch { throw new Error(`Workspace is inaccessible: ${value}`); }
     if (!stat.isDirectory()) throw new Error('Workspace must be a directory');
     if (isDriveRoot(resolved) || isDriveRoot(real)) throw new Error('Workspace must not be a drive root');
@@ -523,15 +534,15 @@ export function createManager(options = {}) {
     const file = path.join(directory(t.id), 'runtime.log');
     let content = '';
     try {
-      const bytes = fs.statSync(file).size;
+      const bytes = fileSystem.statSync(file).size;
       const start = Math.max(0, bytes - 1024 * 1024);
-      const fd = fs.openSync(file, 'r');
+      const fd = fileSystem.openSync(file, 'r');
       try {
         const buffer = Buffer.alloc(bytes - start);
-        fs.readSync(fd, buffer, 0, buffer.length, start);
+        fileSystem.readSync(fd, buffer, 0, buffer.length, start);
         content = buffer.toString('utf8');
       } finally {
-        fs.closeSync(fd);
+        fileSystem.closeSync(fd);
       }
     } catch (error) {
       if (error.code !== 'ENOENT') content = `(runtime log unavailable: ${shortMessage(error)})`;
@@ -549,7 +560,7 @@ export function createManager(options = {}) {
       if (['running', 'stopping'].includes(t.status)) {
         let runtime = t.runtime;
         if (!runtime) {
-          try { runtime = JSON.parse(fs.readFileSync(path.join(directory(name), 'runtime.json'), 'utf8')); } catch {}
+          try { runtime = JSON.parse(fileSystem.readFileSync(path.join(directory(name), 'runtime.json'), 'utf8')); } catch {}
         }
         if (runtime) {
           const verification = verifyOwnedRuntime(runtime);
@@ -577,7 +588,7 @@ export function createManager(options = {}) {
       `--waxwing-owner=${runtime.ownerMarker}`,
       `--waxwing-task=${t.id}`,
     ], {
-      execPath: config.node, cwd: HERE, windowsHide: true,
+      execPath: context.node, cwd: HERE, windowsHide: true,
       env: {
         ...cleanEnvironment(path.join(directory(t.id), 'tmp')),
         WAXWING_OWNER_MARKER: runtime.ownerMarker,
@@ -600,7 +611,7 @@ export function createManager(options = {}) {
       phase: rec.phase,
       health: rec.health,
       lastHeartbeatAt: rec.lastHeartbeatAt ? new Date(rec.lastHeartbeatAt).toISOString() : null,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now(),
       ...extra,
     };
     atomicJson(runtimeFile(t.id), record);
@@ -618,7 +629,7 @@ export function createManager(options = {}) {
    * and dispatches what it returns.
    */
   const settlement = new RuntimeSettlement({
-    terminate: record => terminateVerifiedRuntime(record),
+    terminate: record => terminateRuntime(record),
     fallbackProvider: name => providerByName(name),
     defaultModel: () => config.model,
     supportsEffort: provider => supportsEffort(provider),
@@ -632,7 +643,7 @@ export function createManager(options = {}) {
       if (rec.logBytes > 1024 * 1024) return;
       rec.logBytes += chunk.length;
       // Managed credentials are never read by this manager or passed in arguments.
-      fs.appendFileSync(path.join(directory(task.id), 'runtime.log'), chunk.toString().replace(/sk-[\w-]+/g, '[redacted]'));
+      fileSystem.appendFileSync(path.join(directory(task.id), 'runtime.log'), chunk.toString().replace(/sk-[\w-]+/g, '[redacted]'));
     },
     untrusted: ({id, detail}) => markUntrusted(id, detail),
     terminal: ({task, rec, message}) => settleTerminal(task, rec, message),
@@ -665,15 +676,16 @@ export function createManager(options = {}) {
     gracefulExitTimeoutMs: DEFAULT_EXIT_TIMEOUT_MS,
     forceExitTimeoutMs: FORCE_EXIT_TIMEOUT_MS,
     untrusted: (id, detail) => markUntrusted(id, detail),
-    terminate: async ({rec}) => {
-      if (process.platform === 'win32') {
-        const kill = spawn('taskkill', ['/PID', String(rec.w.pid), '/T', '/F'], {
-          windowsHide: true,
-          stdio: 'ignore',
-        });
-        await once(kill, 'exit');
-      } else {
-        rec.w.kill('SIGKILL');
+    // One kill path: every forced exit goes through identity verification, so
+    // a recycled PID or a foreign process is never terminated.
+    terminate: async ({taskId, rec}) => {
+      const verdict = terminateRuntime({
+        taskId,
+        pid: rec.w.pid,
+        ownerMarker: rec.ownerMarker,
+      });
+      if (verdict?.terminated === false && verdict.alive !== false) {
+        throw new Error(`Could not terminate task ${taskId}: ${verdict.reason ?? 'runtime identity could not be verified'}`);
       }
     },
     settlement,
@@ -801,11 +813,11 @@ export function createManager(options = {}) {
       request: a,
       directory: dir,
       makeDirectories: () => {
-        fs.mkdirSync(dir);
-        fs.mkdirSync(path.join(dir, 'home'));
-        fs.mkdirSync(path.join(dir, 'tmp'));
+        fileSystem.mkdirSync(dir);
+        fileSystem.mkdirSync(path.join(dir, 'home'));
+        fileSystem.mkdirSync(path.join(dir, 'tmp'));
       },
-      removeDirectory: () => fs.rmSync(dir, {recursive: true, force: true}),
+      removeDirectory: () => fileSystem.rmSync(dir, {recursive: true, force: true}),
       preflight: {
         ...preflight,
         workspaceMode: a.workspaceMode ?? config.workspaceMode ?? 'auto',
@@ -832,8 +844,8 @@ export function createManager(options = {}) {
           status: 'created',
           rounds: [],
           eventSequence: 0,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          createdAt: now(),
+          updatedAt: now(),
           acceptance: null,
           effort: preflight.effort,
           usageLimits: preflight.usageLimits,

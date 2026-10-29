@@ -101,6 +101,19 @@ and uses semantic versioning for public releases.
   runtime types are generated from the task-view contract fixture
   (`desktop/src/contract.generated.ts`), every manager call goes through
   `desktop/src/api.ts`, and the unused `TaskDetail.vue` is removed
+- The manager is assembled from one explicit, frozen runtime context instead
+  of importing global configuration. `src/config/load.mjs` resolves the
+  configuration, `src/config/context.mjs` derives every directory, and
+  `createManager` accepts that context plus optional `fs`, `clock`, `git`, and
+  `terminateRuntime` implementations; the shared config is never mutated, and
+  two managers with different data roots no longer interfere. Path utilities
+  move to `src/paths/path-utils.mjs`, and `src/workspace/*` no longer imports
+  `prototype/`. Every forced runtime exit now goes through identity
+  verification, including a live Worker that ignores its close message.
+  Configuration loading, CLI, MCP, loopback client, provider adapters, the
+  provider registry, the DSH budget plugin, and the budget/effort rules move
+  to `src/`; the `prototype/` files at those paths forward to them, and the
+  unused `prototype/state.mjs` is deleted
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and

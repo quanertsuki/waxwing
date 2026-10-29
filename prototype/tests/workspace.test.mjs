@@ -11,7 +11,8 @@ import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {ROOT,RUNS} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {root:ROOT,runsDir:RUNS}=runtimeContext();
 
 const samePath=(a,b)=>{
   const left=path.resolve(a),right=path.resolve(b);

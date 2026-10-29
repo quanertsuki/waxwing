@@ -18,7 +18,8 @@ import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {handle} from '../mcp.mjs';
 import {request} from '../client.mjs';
-import {ROOT,canonicalPath,canonicalExistingPath,isDriveRoot,pathsOverlap} from '../common.mjs';
+import {runtimeContext,canonicalPath,canonicalExistingPath,isDriveRoot,pathsOverlap} from '../common.mjs';
+const ROOT=runtimeContext().root;
 
 const HERE=path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WORKSPACE=path.join(HERE,'..','tests','.tmp',`reliability-smoke-${Date.now()}-${process.pid}`);

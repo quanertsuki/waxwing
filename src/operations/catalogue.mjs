@@ -2,8 +2,8 @@
 // declares its fields, defaults and bounds, which entry points expose it, its
 // handler-facing description, and its read/destructive annotations. Validation
 // and rendering derive from this table so a new operation changes one file.
-import {parseOptionalMaxTokens} from '../../prototype/budget.mjs';
-import {parseOptionalEffort} from '../../prototype/effort.mjs';
+import {parseOptionalMaxTokens} from '../tasks/budget.mjs';
+import {parseOptionalEffort} from '../tasks/effort.mjs';
 import fs from 'node:fs';
 import {parseOverride, validateLimits} from '../usage/policy.mjs';
 import {safeOffset, safePageLimit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT} from '../view/page.mjs';

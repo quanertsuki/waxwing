@@ -9,7 +9,8 @@ import path from 'node:path';
 // Isolation must load before manager/common so the data root is fixed.
 import './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const ROOT=runtimeContext().root;
 import {AcceptanceService} from '../../src/acceptance/service.mjs';
 import {TaskRepository} from '../../src/tasks/repository.mjs';
 import {TaskTransaction} from '../../src/tasks/transaction.mjs';

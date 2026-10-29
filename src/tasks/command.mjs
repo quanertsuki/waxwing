@@ -1,5 +1,5 @@
-import {parseOptionalMaxTokens} from '../../prototype/budget.mjs';
-import {parseOptionalEffort} from '../../prototype/effort.mjs';
+import {parseOptionalMaxTokens} from './budget.mjs';
+import {parseOptionalEffort} from './effort.mjs';
 
 function plainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);

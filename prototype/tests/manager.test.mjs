@@ -13,7 +13,8 @@ import {fileURLToPath} from 'node:url';
 // is fixed before common.mjs resolves its data root.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {config,ROOT,RUNS} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {config,root:ROOT,runsDir:RUNS}=runtimeContext();
 import {budgetFileFor,readRoundBudget,writeRoundBudget} from '../budget.mjs';
 
 // Defense in depth: refuse to run any createManager call (which calls

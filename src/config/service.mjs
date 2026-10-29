@@ -10,7 +10,7 @@ import {
   resolveProvider,
   validateProviderConfig,
 } from '../providers/registry.mjs';
-import {platformDataRoot} from '../../prototype/config.mjs';
+import {platformDataRoot} from './load.mjs';
 
 /** Limit defaults used when the configuration file leaves a value out. */
 export const DEFAULT_LIMITS = Object.freeze({

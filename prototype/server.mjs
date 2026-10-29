@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomBytes} from 'node:crypto';
-import {config,ROOT,RUNTIME,atomicJson} from './common.mjs';
+import {atomicJson,runtimeContext} from './common.mjs';
 import {createManager} from './manager.mjs';
 import {OperationError,validateOperation} from '../src/operations/catalogue.mjs';
 
@@ -28,16 +28,19 @@ export function classifyError(error) {
  */
 export function createGateway({
   manager = createManager(),
-  port = config.port,
+  port = null,
   host = '127.0.0.1',
   token = null,
-  root = ROOT,
-  dshRepo = config.dshRepo,
-  model = config.model,
+  root = null,
+  dshRepo = null,
+  model = null,
   pid = process.pid,
+  context = runtimeContext(),
 } = {}) {
+  // Launchers choose the context; the gateway never re-derives it so the
+  // health answer and the manager it fronts cannot disagree.
   let currentToken = token;
-  let boundPort = port;
+  let boundPort = port ?? context.port;
   let closing = false;
   const reply = (res, status, value) => {
     res.statusCode = status;
@@ -91,7 +94,7 @@ export function createGateway({
     return new Promise((resolve, reject) => {
       const onError = error => reject(error);
       server.once('error', onError);
-      server.listen(port, host, () => {
+      server.listen(boundPort, host, () => {
         server.off('error', onError);
         const address = server.address();
         boundPort = typeof address === 'object' && address ? address.port : port;
@@ -122,19 +125,26 @@ export function createGateway({
 }
 
 async function start() {
-  const manager = createManager();
-  const gateway = createGateway({manager});
+  const context = runtimeContext();
+  const manager = createManager({context});
+  const gateway = createGateway({
+    manager,
+    context,
+    root: context.root,
+    dshRepo: context.config.dshRepo,
+    model: context.config.model,
+  });
   await gateway.listen({
     onListening() {
       const token = randomBytes(32).toString('hex');
       gateway.setToken(token);
-      fs.writeFileSync(path.join(RUNTIME, 'server-token'), token, {mode: 0o600});
-      atomicJson(path.join(RUNTIME, 'daemon.json'), {
+      fs.writeFileSync(path.join(context.runtimeDir, 'server-token'), token, {mode: 0o600});
+      atomicJson(path.join(context.runtimeDir, 'daemon.json'), {
         pid: process.pid,
         port: gateway.port,
         startedAt: new Date().toISOString(),
       });
-      console.log(`Waxwing ready on 127.0.0.1:${gateway.port}; data: ${ROOT}`);
+      console.log(`Waxwing ready on 127.0.0.1:${gateway.port}; data: ${context.root}`);
     },
   });
   const stop = async () => {

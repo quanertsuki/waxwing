@@ -4,7 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
-import {config,ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {config,root:ROOT}=runtimeContext();
 import {parseResearchCollectArgs,parseStatusArgs,parseWaitArgs,wait,waitTimeoutMs,WAIT_GRACE_MS} from '../cli.mjs';
 
 const samePath=(a,b)=>{const left=path.resolve(a),right=path.resolve(b);return process.platform==='win32'?left.toLowerCase()===right.toLowerCase():left===right;};

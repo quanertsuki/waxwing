@@ -11,7 +11,10 @@ import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before manager.mjs/common.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {config,ROOT,RUNS,canonicalPath,isDriveRoot,pathsOverlap,sameOrDescendantPath} from '../common.mjs';
+import {runtimeContext,canonicalPath,isDriveRoot,pathsOverlap,sameOrDescendantPath} from '../common.mjs';
+const {root:ROOT,runsDir:RUNS}=runtimeContext();
+// Test-owned configuration: mutations affect only this manager instance.
+const config={...runtimeContext().config};
 import {budgetFileFor,readRoundBudget,writeRoundBudget} from '../budget.mjs';
 
 const samePath=(a,b)=>{const left=path.resolve(a),right=path.resolve(b);return process.platform==='win32'?left.toLowerCase()===right.toLowerCase():left===right;};
@@ -24,7 +27,7 @@ fs.rmSync(base,{recursive:true,force:true});fs.mkdirSync(base,{recursive:true});
 
 const managers=[];
 function managerWith(forkWorker) {
-  const manager=createManager({forkWorker});
+  const manager=createManager({forkWorker,config});
   managers.push(manager);
   return manager;
 }

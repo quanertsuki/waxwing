@@ -13,12 +13,19 @@ interface.
 | --- | --- |
 | `src/app.mjs` | Public composition root and stable exports |
 | `src/operations/catalogue.mjs` | One operation table: fields, defaults, bounds, entry exposure, annotations, shared validation, CLI parsing, and stable error codes used by the manager, CLI, MCP, and HTTP gateway |
+| `src/config/load.mjs` | Configuration layering: `config.json`, the per-user local override, and environment aliases become one resolved object; no import-time reads |
+| `src/config/context.mjs` | One frozen runtime context per manager: resolved config plus data, runs, reports, runtime, research, providers, and pricing paths |
+| `src/config/data-root.mjs` | Data-directory creation and the copy-only legacy migration, both against an explicit context |
 | `src/config/paths.mjs` | One path resolution for launchers: `node cli.mjs paths` prints the data root, token file, HTTP URL, and manager script the desktop consumes |
 | `src/config/service.mjs` | The only interpreter of provider files and editable settings: Node-side validation, naming, legacy local-config migration, and restart reporting |
 | `src/storage/durable-file.mjs` | Atomic text/JSON writes with transient-rename retry, replace-with-backup transactions, and the shared SHA-256 |
+| `src/adapters/client.mjs` | Loopback client: one request shape, token source, and server launcher keyed by the runtime context |
 | `src/adapters/cli.mjs` | CLI adapter; command parsing and help are generated from the operation catalogue |
 | `src/adapters/mcp.mjs` | MCP stdio adapter with `waxwing_*` names and `ds_*` aliases; tool schemas come from the operation catalogue |
+| `src/paths/path-utils.mjs` | Lexical and symlink-aware path comparison shared by workspace ownership, managed-data checks, and research |
 | `src/tasks/repository.mjs` | Task index, deeply frozen records, atomic `task.json`, and the single commit path: save the record, then append events with the next monotonic sequence |
+| `src/tasks/budget.mjs` | Output-budget validation, inheritance, and the per-round budget file |
+| `src/tasks/effort.mjs` | Reasoning-effort values, validation, and inheritance |
 | `src/tasks/lifecycle.mjs` | Legal task-status transitions and the shared active/terminal status sets used by the manager and research |
 | `src/tasks/wait-loop.mjs` | One bounded wait loop (deadline, remaining-time arithmetic, `timedOut` result) shared by task and research waits |
 | `src/tasks/transaction.mjs` | Create/stop transactions, rollback ordering, rework acceptance revocation, and the round-start record+event commit |
@@ -34,7 +41,7 @@ interface.
 | `src/runtime/lifecycle.mjs` | Deprecated compatibility facade over `RuntimeSettlement`; removal at 0.3.0 |
 | `src/runtime/outcome.mjs` | Deprecated alias of `RuntimeSettlement`; removal at 0.3.0 |
 | `src/runtime/supervisor.mjs` | Deprecated facade over the Runtime release/exit gates; removal at 0.3.0 |
-| `src/runtime/identity.mjs` | Residual-runtime identity verification |
+| `src/runtime/identity.mjs` | Runtime identity verification and the only process-termination path: every forced exit, live or recovered, is verified first |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants; owns the report+record commit and the policy appendix |
 | `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification, and `shardCapturePatch`, which decides what a captured shard view means |
 | `src/research/repository.mjs` | Batch storage, atomic `batch.json`, and crash-window orphan reconciliation |
@@ -49,19 +56,31 @@ interface.
 | `src/usage/service.mjs` | Deprecated compatibility adapter; production callers use `UsageModule` |
 | `prototype/usage.mjs` | Legacy usage entry point forwarding to metrics and the module |
 | `src/providers/registry.mjs` | Provider discovery, built-in provider names, adapter selection, declared capabilities, and task preparation |
-| `prototype/providers/base.mjs` | Provider adapter interface: one round in, bare DSH-format events out, declarative capabilities |
-| `prototype/providers/dsh-sdk.mjs` | DSH SDK adapter: one long-lived harness session, the task runtime patch, and the per-round budget file |
-| `prototype/providers/openai-chat.mjs` | OpenAI-compatible adapter: tool loop, streaming, and an injectable HTTP transport |
+| `src/providers/adapters/base.mjs` | Provider adapter interface: one round in, bare DSH-format events out, declarative capabilities |
+| `src/providers/adapters/dsh-sdk.mjs` | DSH SDK adapter: one long-lived harness session, the task runtime patch, and the per-round budget file |
+| `src/providers/adapters/openai-chat.mjs` | OpenAI-compatible adapter: tool loop, streaming, and an injectable HTTP transport |
+| `src/providers/budget-plugin.mjs` | DSH plugin mounted into a task runtime; applies the task's budget file to every conversation request |
 | `src/worker/tools.mjs` | Worker-side bash/read/write tool set and executor |
 | `src/providers/adapter-cache.mjs` | One adapter per Provider identity inside a Worker process |
-| `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
-| `prototype/` | Legacy entry-point and data compatibility until at least `0.2.0` |
+| `prototype/manager.mjs` | Composition root: builds one manager from an explicit context and injectable runtime dependencies |
+| `prototype/server.mjs` | HTTP gateway process: binds the configured port, writes the token, and fronts one manager |
+| `prototype/worker.mjs` | Worker process: runs one round through the task's Provider adapter |
+| `prototype/` | Compatibility forwarders for the `0.1` import paths and entry points; implementations live under `src/` |
+
+The manager is assembled, not imported: the launcher resolves one
+`createRuntimeContext`, then passes it to `createManager`, which forwards the
+configuration and directories to the modules it builds. The context is frozen,
+nothing reads configuration at import time, and the manager accepts optional
+`fs`, `clock`, `git`, and `terminateRuntime` implementations. Two managers with
+different contexts therefore share no task state and can run in one process.
+Modules such as the repository, acceptance service, and workspace lease manager
+receive those dependencies at construction instead of reaching for globals.
 
 `0.1` uses an incremental extraction rather than a full manager rewrite. The
-service files above are the public module boundaries; several implementations
-still delegate to battle-tested `prototype/` code. The coordinator remains the
-single owner of a task lifecycle, so adapters and desktop commands never write
-task state directly.
+service files above are the public module boundaries. The coordinator remains
+the single owner of a task lifecycle, so adapters and desktop commands never
+write task state directly. Every file under `prototype/` except the manager,
+server, worker, and legacy usage entry forwards to a `src/` module.
 
 The release safety net discovers its inputs instead of listing them: the test
 runner imports every `prototype/tests/*.test.mjs`, the release check requires
