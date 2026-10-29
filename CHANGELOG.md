@@ -20,6 +20,14 @@ and uses semantic versioning for public releases.
 - Task status views and research reports share one paging rule: an offset past
   the end clamps to an empty final page, an offset inside a surrogate pair is
   rejected, and every page reports `complete`
+- `RuntimeSettlement` is the one projection from a runtime fact (terminal
+  message, startup/fallback/stop failure, ACK timeout, process error or exit,
+  close, restart identity) to the task status, event, lease conclusion, and
+  handle decision. Close and restart recovery now pass through the lifecycle
+  table: `fail` from `running`, the new `fail_stop` from `stopping`, and a
+  repeated failure only updates `error` and records its event.
+  `RuntimeSupervisor`, `RuntimeLifecycle`, and `RuntimeOutcomeSettlement` remain
+  as deprecated facades until 0.3.0; `close-outcome.mjs` is removed
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and

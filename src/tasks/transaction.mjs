@@ -1,4 +1,4 @@
-import {RuntimeCloseOutcome} from '../runtime/close-outcome.mjs';
+import {RuntimeSettlement} from '../runtime/settlement.mjs';
 import {TaskLifecycle, transition} from './lifecycle.mjs';
 
 /**
@@ -25,8 +25,7 @@ export class TaskTransaction {
     forceExitTimeoutMs,
     terminate = null,
     untrusted = () => {},
-    runtimeLifecycle = null,
-    closeOutcome = null,
+    settlement = null,
   } = {}) {
     if (!runtime) throw new Error('runtime dependency is required');
     if (!repository) throw new Error('repository dependency is required');
@@ -42,9 +41,7 @@ export class TaskTransaction {
     this.forceExitTimeoutMs = forceExitTimeoutMs;
     this.terminate = terminate;
     this.onUntrusted = untrusted;
-    this.runtimeLifecycle = runtimeLifecycle;
-    this.closeOutcome = closeOutcome
-      ?? (runtimeLifecycle ? {project: args => runtimeLifecycle.exit(args)} : new RuntimeCloseOutcome({now}));
+    this.settlement = settlement ?? new RuntimeSettlement({now});
   }
 
   /**
@@ -124,7 +121,7 @@ export class TaskTransaction {
         const gone = await this.runtime.waitForExit(taskId, this.forceExitTimeoutMs);
         if (!gone) {
           this.runtime.abortClose?.(taskId);
-          const outcome = this.closeOutcome.project({
+          const outcome = this.settlement.close({
             task: this.repository.peek(taskId) ?? stopping,
             exitConfirmed: false,
           });
@@ -134,7 +131,7 @@ export class TaskTransaction {
       }
 
       const closeError = this.runtime.closeError(taskId);
-      const outcome = this.closeOutcome.project({
+      const outcome = this.settlement.close({
         task: this.repository.peek(taskId) ?? stopping,
         exitConfirmed: true,
         closeError,

@@ -24,11 +24,11 @@ interface.
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
 | `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
-| `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff; a handle is retained until `forget`, so a failed final save stays retryable |
-| `src/runtime/close-outcome.mjs` | Confirmed-exit close projection, cleanup failure, and handle-release decision |
-| `src/runtime/lifecycle.mjs` | Restart recovery projection: verified termination, manual retention, confirmed exit |
-| `src/runtime/outcome.mjs` | Runtime terminal outcome, first-round fallback, protocol failure, and ACK timeout projection |
-| `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
+| `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff; owns the release and exit gates; a handle is retained until `forget`, so a failed final save stays retryable |
+| `src/runtime/settlement.mjs` | One projection from every runtime fact (terminal, startup failure, fallback failure, ACK timeout, process error/exit, close, restart identity) to the task status, event, lease conclusion, and handle decision |
+| `src/runtime/lifecycle.mjs` | Deprecated compatibility facade over `RuntimeSettlement`; removal at 0.3.0 |
+| `src/runtime/outcome.mjs` | Deprecated alias of `RuntimeSettlement`; removal at 0.3.0 |
+| `src/runtime/supervisor.mjs` | Deprecated facade over the Runtime release/exit gates; removal at 0.3.0 |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
 | `src/tasks/command.mjs` | Create/rework/preflight validation order and transaction inputs |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants; owns the report+record commit and the policy appendix |
@@ -75,7 +75,7 @@ flowchart LR
   subgraph Manager["Local manager: single state owner"]
     TaskCmd["TaskCommand<br/>create/rework/preflight"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
-    Outcome["RuntimeOutcome<br/>terminal/fallback/ack-timeout"]
+    Settlement["RuntimeSettlement<br/>terminal/failure/close/recovery"]
     Runtime["Runtime<br/>round IDs + heartbeat + recovery"]
     Supervisor["RuntimeSupervisor<br/>release + exit gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
@@ -112,7 +112,7 @@ flowchart LR
   Gateway --> Research
   Gateway --> Usage
   TaskCmd --> Tasks
-  Tasks <--> Outcome
+  Tasks <--> Settlement
   Tasks <--> Runtime
   Runtime --> Supervisor
   Tasks <--> Lease

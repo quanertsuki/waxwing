@@ -20,7 +20,7 @@ import {
   createRoundId,
   isRoundId,
 } from './protocol.mjs';
-import {RuntimeSupervisor} from './supervisor.mjs';
+import {RuntimeSettlement} from './settlement.mjs';
 
 /**
  * Resolve the configured round timers into one value object. The Runtime module,
@@ -48,6 +48,53 @@ const DEFAULT_HEARTBEAT_CHECK_MS = 5_000;
 const DEFAULT_EXIT_TIMEOUT_MS = 14_000;
 const FORCE_EXIT_TIMEOUT_MS = 5_000;
 
+// Release and exit gates. A terminal message is not permission to dispatch the
+// next round: only an explicit `released` opens the gate, and only the process
+// handle can confirm an exit. `Runtime` uses these directly; the deprecated
+// `RuntimeSupervisor` export delegates to them.
+
+/** Release every waiter on the gate with one verdict. */
+export function settleRecordRelease(record, value) {
+  if (!record?.releaseWaiters) return;
+  const waiters = record.releaseWaiters.splice(0);
+  for (const resolve of waiters) resolve(value);
+}
+
+/** Resolve once the active round releases; an exited record yields false. */
+export function waitForRecordRelease(record) {
+  if (!record || record.phase === 'idle') return Promise.resolve(true);
+  if (record.phase === 'exited') return Promise.resolve(false);
+  return new Promise(resolve => record.releaseWaiters.push(resolve));
+}
+
+/** True only when the process handle reports an exit code or signal. */
+export function recordHasExited(record) {
+  const value = record?.w;
+  return value?.exitCode !== null && value?.exitCode !== undefined
+    || value?.signalCode !== null && value?.signalCode !== undefined;
+}
+
+/** Wait for the owned process exit event, including an already-exited handle. */
+export function waitForRecordExit(record, timeoutMs) {
+  return new Promise(resolve => {
+    if (recordHasExited(record)) {
+      resolve(true);
+      return;
+    }
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      record.w.off?.('exit', onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    record.w.once?.('exit', onExit) ?? record.w.on?.('exit', onExit);
+  });
+}
+
 /**
  * Hooks the manager (or a test double) implements:
  *   spawn({task, ownerMarker}) -> process handle        (required on first round)
@@ -68,7 +115,9 @@ const FORCE_EXIT_TIMEOUT_MS = 5_000;
 export class Runtime {
   constructor(hooks = {}, options = {}) {
     this.hooks = hooks;
-    this.supervisor = options.supervisor ?? new RuntimeSupervisor();
+    // Process failures are projected through the same settlement rules the
+    // manager uses for every other runtime fact.
+    this.settlement = options.settlement ?? new RuntimeSettlement();
     this.records = new Map();
     // A worker can report a close error and exit immediately; keep that fact
     // until the close transaction has persisted its outcome.
@@ -98,7 +147,7 @@ export class Runtime {
   /** Drop an owned handle once its exit is demonstrably confirmed. */
   forget(id) {
     const rec = this.records.get(id);
-    if (rec && this.supervisor.hasExited(rec)) {
+    if (rec && recordHasExited(rec)) {
       this.records.delete(id);
       this.closeErrors.delete(id);
       return true;
@@ -122,16 +171,16 @@ export class Runtime {
   // --- gates -----------------------------------------------------------------
   /** Resolve only once the active round has released, never on a bare result. */
   waitForRelease(value) {
-    return this.supervisor.waitForRelease(this.#rec(value));
+    return waitForRecordRelease(this.#rec(value));
   }
 
   waitForExit(value, timeoutMs = DEFAULT_EXIT_TIMEOUT_MS) {
     const rec = this.#rec(value);
     if (!rec) return Promise.resolve(true);
-    return this.supervisor.waitForExit(rec, timeoutMs);
+    return waitForRecordExit(rec, timeoutMs);
   }
 
-  hasExited(value) { return this.supervisor.hasExited(this.#rec(value)); }
+  hasExited(value) { return recordHasExited(this.#rec(value)); }
 
   isClosing(id) { return Boolean(this.records.get(id)?.closing); }
 
@@ -416,7 +465,7 @@ export class Runtime {
       this.hooks.save?.({task: released});
       // Releasing the gate is what lets a queued rework or Provider fallback
       // dispatch; nothing may start a new round before this point.
-      this.supervisor.settleRelease(rec, true);
+      settleRecordRelease(rec, true);
       const fallback = rec.pendingFallback;
       rec.pendingFallback = null;
       this.hooks.released?.({task: released, rec, fallback});
@@ -428,18 +477,13 @@ export class Runtime {
     const rec = this.records.get(taskId);
     if (!rec) return;
     this.hooks.untrusted?.({id: taskId, detail: 'process error'});
-    const task = this.hooks.latest?.(taskId);
-    if (!task) return;
-    const message = `Task ${taskId} worker error: ${error.message}`;
     this.clearMonitors(rec);
     rec.phase = 'exited';
-    this.supervisor.settleRelease(rec, false);
-    try { this.persist(task, rec, {exitReason: message}); } catch {}
-    if (task.status === 'running') {
-      const failed = this.hooks.transition({task, action: 'fail'});
-      failed.error = message;
-      try { this.hooks.save?.({task: failed}); } catch {}
-    }
+    settleRecordRelease(rec, false);
+    const task = this.hooks.latest?.(taskId);
+    if (!task) return;
+    try { this.persist(task, rec, {exitReason: `Task ${taskId} worker error: ${error.message}`}); } catch {}
+    this.#settle(this.settlement.processError({task, error}));
   }
 
   onProcessExit(taskId, code) {
@@ -449,22 +493,25 @@ export class Runtime {
     rec.phase = 'exited';
     // A runtime that exited before releasing its round may never resume, so
     // whoever waits at the gate gets false rather than a silent stall.
-    this.supervisor.settleRelease(rec, false);
+    settleRecordRelease(rec, false);
     // The handle stays until `forget`: a terminal record that failed to save
     // must still find a retryable `stopping` task. `isLive` reports the exit.
     const task = this.hooks.latest?.(taskId);
     try { if (task) this.persist(task, rec, {exitCode: code}); } catch {}
-    if (task?.status === 'running') {
-      const failed = this.hooks.transition({task, action: 'fail'});
-      failed.error = `Task ${taskId} worker exited (${code}); inspect runtime.log`;
-      try { this.hooks.save?.({task: failed}); } catch {}
-    }
+    if (task) this.#settle(this.settlement.processExited({task, code}));
   }
 
   // --- internals -------------------------------------------------------------
   #rec(value) {
     if (typeof value === 'string') return this.records.get(value) ?? null;
     return value ?? null;
+  }
+
+  /** Execute the journal and persistence order for a settlement result. */
+  #settle(outcome) {
+    if (!outcome?.event) return;
+    try { this.hooks.event?.({task: outcome.task, payload: outcome.event}); } catch {}
+    try { this.hooks.save?.({task: outcome.task}); } catch {}
   }
 
   persist(task, rec, extra) {

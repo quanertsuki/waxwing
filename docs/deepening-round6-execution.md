@@ -113,3 +113,20 @@
 - 完整测试：`290/290` 通过，40 个测试文件；Rust `15/15` 通过。
 - 发布树：`260` 个文件通过。
 - 遗留：Rust 侧没有实现 `researchRoot`/`credentialsFile` 的解析（原状），#14 会让 Rust 不再解析配置。
+
+### 阶段 2：P1 运行时与任务写入
+
+#### #6 Runtime 结局收进一个 Settlement Module
+
+状态：完成。
+
+- 新增 `src/runtime/settlement.mjs`：`RuntimeSettlement` 把终态消息、首次 fallback、启动失败、fallback 失败、停止失败、ACK 超时、`worker_busy`、缺少终态、进程错误/退出、关闭、重启恢复统一投影为同一形状 `{task, action, event, health, releaseHandle, runtime, fallback, decision, lease, error}`。
+- `src/tasks/lifecycle.mjs` 新增 `fail_stop`（`stopping` → `failed`）。失败投影规则：`running` 走 `fail`，`stopping` 走 `fail_stop`，已 `failed` 再次失败只更新 `error`/`updatedAt` 并记录事件；其他状态抛 `Cannot fail task in ...`。进程退出在 `stopping`、`awaiting_review` 等期望退出的状态保持记录不变。
+- `src/runtime/module.mjs`：释放/退出 gate 并回 Runtime（`settleRecordRelease` 等导出供兼容类使用）；进程错误和退出改走 Settlement 并追加 `runtime_error`/`runtime_exit` 事件。`src/runtime/supervisor.mjs` 成为委托这些 gate 的弃用类。
+- `src/tasks/transaction.mjs` 直接消费 `settlement.close` 的 `releaseHandle`/`error`/`task`，不再自己判断关闭分支；`close-outcome.mjs` 删除。
+- `src/runtime/lifecycle.mjs`、`src/runtime/outcome.mjs` 改为弃用兼容门面/别名（0.3.0 删除）。
+- `prototype/manager.mjs` 只构造一个 `RuntimeSettlement`，同时注入 Runtime、TaskTransaction 和各 settle 回调；恢复也走同一实例。
+- 目标测试：新增 `runtime-settlement.test.mjs` 16 项（失败事实 × 状态表、非法起始状态抛错、进程错误/退出、关闭三种结局、终态成功/失败、首轮 fallback、恢复五种判决与非法输入）；`task-transaction.test.mjs` 新增 1 项（关闭清理失败 → `failed`，再次 close 成功进入 `closed`）。原 `runtime-outcome`、`runtime-close-outcome`、`runtime-lifecycle` 三个测试文件迁移到共享表，覆盖场景不减少。
+- 完整测试：`288/288` 通过，41 个测试文件。
+- 发布树：`258` 个文件通过（`close-outcome.mjs` 删除，新增 `settlement.mjs`；三个旧测试文件合并为一个）。
+- 遗留：`firstRoundFailure` 把任务失败与 fallback 决策放在同一个投影里，仍有 `fallback` 字段；#9 之后如需进一步拆分再处理。

@@ -16,8 +16,7 @@ import {UsageModule} from '../src/usage/module.mjs';
 import {ExecutionPolicy} from '../src/usage/execution-policy.mjs';
 import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
-import {RuntimeLifecycle} from '../src/runtime/lifecycle.mjs';
-import {RuntimeOutcomeSettlement} from '../src/runtime/outcome.mjs';
+import {RuntimeSettlement} from '../src/runtime/settlement.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
 import {TaskRepository} from '../src/tasks/repository.mjs';
 import {TaskTransaction} from '../src/tasks/transaction.mjs';
@@ -333,7 +332,7 @@ export function createManager(options = {}) {
     const message = `Task ${id} failed to start: ${error.message}${runtimeUnconfirmed ? '; runtime exit not confirmed (process may still be running)' : ''}`;
     const cur = repository.peek(id);
     if (cur) {
-      const outcome = outcomeSettlement.startFailed({
+      const outcome = settlement.startFailed({
         task: cur,
         error: error.message,
         message,
@@ -571,7 +570,7 @@ export function createManager(options = {}) {
         }
         if (runtime) {
           const verification = verifyOwnedRuntime(runtime);
-          const outcome = runtimeLifecycle.recover({task: t, runtime, identity: verification});
+          const outcome = settlement.recover({task: t, runtime, identity: verification});
           if (outcome.decision !== 'not-recoverable') {
             runtime = outcome.runtime;
             Object.assign(t, outcome.task);
@@ -647,6 +646,17 @@ export function createManager(options = {}) {
    * process fork, and the Provider-fallback handoff that only fires after a
    * release. No filesystem layout, Git, acceptance, or usage logic lives here.
    */
+  /**
+   * One settlement rule for every runtime fact: the task status, the event,
+   * the lease conclusion, and the handle decision. The manager only persists
+   * and dispatches what it returns.
+   */
+  const settlement = new RuntimeSettlement({
+    terminate: record => terminateVerifiedRuntime(record),
+    fallbackProvider: name => providerByName(name),
+    defaultModel: () => config.model,
+    supportsEffort: provider => supportsEffort(provider),
+  });
   const runtime = new Runtime({
     spawn: ({task, ownerMarker}) => forkWorker(task, {ownerMarker}),
     latest: id => repository.peek(id) ?? null,
@@ -667,16 +677,7 @@ export function createManager(options = {}) {
     released: ({fallback}) => handoffReleased(fallback),
     ackTimeout: ({task, rec, roundId, timeoutMs}) => settleAckTimeout(task, rec, roundId, timeoutMs),
     roundTimeout: ({rec, timeoutMs}) => stopAfterRoundTimeout(rec, timeoutMs),
-  });
-  const runtimeLifecycle = new RuntimeLifecycle({
-    terminate: record => terminateVerifiedRuntime(record),
-  });
-  const outcomeSettlement = new RuntimeOutcomeSettlement({
-    transition: (task, action) => transition(task, action),
-    fallbackProvider: name => providerByName(name),
-    defaultModel: () => config.model,
-    supportsEffort: provider => supportsEffort(provider),
-  });
+  }, {settlement});
   /**
    * Liveness facade. Two questions must stay distinct: `live` means the owned
    * process has not been observed to exit, so it may still write files; `held`
@@ -710,13 +711,13 @@ export function createManager(options = {}) {
         rec.w.kill('SIGKILL');
       }
     },
-    runtimeLifecycle,
+    settlement,
   });
   /** Persist a terminal result or error, applying first-round Provider fallback. */
   function settleTerminal(task, rec, message) {
     let fallback = null;
     try {
-      fallback = outcomeSettlement.firstRoundFailure(task, message, config.fallbackProvider);
+      fallback = settlement.firstRoundFailure(task, message, config.fallbackProvider);
     } catch (error) {
       event(task, {kind: 'provider_fallback_failed', error: error.message});
     }
@@ -726,19 +727,19 @@ export function createManager(options = {}) {
       runtime.deferFallback(fallback.fallback.taskId, fallback.fallback);
       return;
     }
-    const outcome = outcomeSettlement.terminal({task, message});
+    const outcome = settlement.terminal({task, message});
     event(outcome.task, outcome.event);
     save(outcome.task);
   }
   /** A release without a result or error is a protocol violation, not a success. */
   function settleMissingTerminal(task, rec, message) {
-    const outcome = outcomeSettlement.missingTerminal({task, message});
+    const outcome = settlement.missingTerminal({task, message});
     event(outcome.task, outcome.event);
     save(outcome.task);
   }
   /** A busy worker means its previous round never released; fail explicitly. */
   function settleWorkerBusy(task, rec, message) {
-    const outcome = outcomeSettlement.workerBusy({task, message});
+    const outcome = settlement.workerBusy({task, message});
     event(outcome.task, outcome.event);
     runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
     save(outcome.task);
@@ -751,7 +752,7 @@ export function createManager(options = {}) {
     void executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort).catch(error => {
       const latest = repository.peek(fallback.taskId);
       if (latest && latest.status !== 'failed') {
-        persistFailure(outcomeSettlement.fallbackFailed({
+        persistFailure(settlement.fallbackFailed({
           task: latest,
           providerName: fallback.providerName,
           message: `Fallback to ${fallback.providerName} also failed: ${error.message}`,
@@ -761,7 +762,7 @@ export function createManager(options = {}) {
   }
   /** An unacknowledged round is untrusted, but its process is deliberately kept. */
   function settleAckTimeout(task, rec, roundId, timeoutMs) {
-    const outcome = outcomeSettlement.ackTimeout({task, roundId, timeoutMs});
+    const outcome = settlement.ackTimeout({task, roundId, timeoutMs});
     runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
     event(outcome.task, outcome.event);
     try { save(outcome.task); } catch {}
@@ -774,7 +775,7 @@ export function createManager(options = {}) {
       // worker handle in place, so the workspace stays locked.
       const cur = repository.peek(id);
       if (cur && cur.status === 'running') {
-        persistFailure(outcomeSettlement.stopFailed({
+        persistFailure(settlement.stopFailed({
           task: cur,
           timeoutMs,
           message: `Task ${id} timed out, but stopping it failed: ${error.message}`,

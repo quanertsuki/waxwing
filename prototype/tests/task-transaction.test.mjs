@@ -186,6 +186,44 @@ test('stop without a runtime handle closes directly and records the final event'
   }
 });
 
+test('a close cleanup failure fails the stopping task and the next close can finish it', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, (file, value) => {
+      fs.mkdirSync(path.dirname(file), {recursive: true});
+      fs.writeFileSync(file, JSON.stringify(value));
+    });
+    const task = {id: 'task-0123456789ab', status: 'awaiting_review', rounds: []};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const runtime = memoryRuntime(new Map([[task.id, {w: {pid: 7}}]]));
+    runtime.closeError = () => 'close request failed: pipe broke';
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save: value => repository.save(value),
+      event: () => {},
+      acceptance: {
+        writeReportAndSave: (value, {save}) => ({task: save({...value, reportHash: 'report-hash'})}),
+      },
+    });
+
+    await assert.rejects(
+      transaction.stop(task.id, {closed: true}),
+      /runtime cleanup failed: close request failed/,
+    );
+    const failed = repository.get(task.id);
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error, /runtime cleanup failed/);
+
+    const retried = await transaction.stop(task.id, {closed: true});
+    assert.equal(retried.task.status, 'closed');
+    assert.equal(retried.task.reportHash, 'report-hash');
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
 test('stop with a live runtime persists stopping before confirming exit and merges the latest record', async () => {
   const root = temporaryRoot();
   try {
