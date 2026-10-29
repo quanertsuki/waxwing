@@ -8,6 +8,7 @@ import {TaskRepository} from '../../src/tasks/repository.mjs';
 import {TaskTransaction} from '../../src/tasks/transaction.mjs';
 import {transition as applyTransition} from '../../src/tasks/lifecycle.mjs';
 import {Runtime} from '../../src/runtime/module.mjs';
+import {AcceptanceService} from '../../src/acceptance/service.mjs';
 
 function temporaryRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-transaction-'));
@@ -172,7 +173,9 @@ test('stop without a runtime handle closes directly and records the final event'
       repository,
       save: value => repository.save(value),
       event: (value, payload) => events.push({status: value.status, ...payload}),
-      acceptance: {report: () => ({hash: 'report-hash'})},
+      acceptance: {
+        writeReportAndSave: (value, {save}) => ({task: save({...value, reportHash: 'report-hash'})}),
+      },
     });
     const result = await transaction.stop(task.id, {closed: true});
     assert.equal(result.task.status, 'closed');
@@ -274,7 +277,11 @@ test('a real runtime retains an exited handle so a failed close save can retry',
     };
     const runtime = realRuntime({repository, handle, save});
     runtime.adopt(task, handle, 'owner-marker');
-    const transaction = new TaskTransaction({runtime, repository, save, event: () => {}});
+    const acceptance = new AcceptanceService({
+      reportsDir: path.join(root, 'reports'),
+      grantsDir: path.join(root, 'runtime'),
+    });
+    const transaction = new TaskTransaction({runtime, repository, save, event: () => {}, acceptance});
 
     await assert.rejects(() => transaction.stop(task.id, {closed: true}), /disk full/);
     assert.equal(repository.peek(task.id).status, 'stopping', 'the final state was never made durable');
@@ -334,7 +341,16 @@ test('an unexpected exit fails the task and the next close forgets the handle', 
     assert.equal(runtime.isLive(task.id), false);
     assert.deepEqual(runtime.liveIds(), []);
 
-    const transaction = new TaskTransaction({runtime, repository, save, event: () => {}});
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save,
+      event: () => {},
+      acceptance: new AcceptanceService({
+        reportsDir: path.join(root, 'reports'),
+        grantsDir: path.join(root, 'runtime'),
+      }),
+    });
     const result = await transaction.stop(task.id, {closed: true});
     assert.equal(result.task.status, 'closed');
     assert.equal(runtime.has(task.id), false);

@@ -23,6 +23,11 @@ and uses semantic versioning for public releases.
 - A process exit no longer drops the Runtime handle immediately: the handle is
   retained until `forget`, so a failed final close save can be retried instead
   of leaving the task stuck in `stopping`
+- Closing a task now writes the report and the task record that carries its
+  hash as one atomic commit: a failed task save restores the previous report,
+  and the close reports can no longer lose the execution-policy appendix
+- A deletion grant is persisted before it is honored in memory, so a failed
+  grant write cannot authorize a deletion that disappears on restart
 
 ## [0.2.0] - 2026-10-28
 

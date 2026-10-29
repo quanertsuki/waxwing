@@ -30,7 +30,7 @@ interface.
 | `src/runtime/supervisor.mjs` | Release and confirmed-exit gates used by the runtime module |
 | `src/runtime/identity.mjs` | Residual-runtime identity verification |
 | `src/tasks/command.mjs` | Create/rework/preflight validation order and transaction inputs |
-| `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants |
+| `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants; owns the report+record commit and the policy appendix |
 | `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification |
 | `src/research/repository.mjs` | Batch storage, atomic `batch.json`, and crash-window orphan reconciliation |
 | `src/research/capture.mjs` | Terminal result/error capture isolated per shard |

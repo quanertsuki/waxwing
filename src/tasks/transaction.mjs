@@ -10,7 +10,7 @@ import {TaskLifecycle, transition} from './lifecycle.mjs';
  *   runtime.has/get/beginClose/sendClose/waitForExit/forget/closeError
  *   save(task), event(task, payload), untrusted(id, detail)
  *   workspace.materialize/rollback
- *   acceptance.report(task)
+ *   acceptance.writeReportAndSave(task, {save}), acceptance.revoke(task)
  */
 export class TaskTransaction {
   constructor({
@@ -162,15 +162,7 @@ export class TaskTransaction {
       const finalTask = {...transitioned, error: reason ?? transitioned.error};
       let savedTask = finalTask;
       try {
-        if (closed && typeof this.acceptance.writeReportAndSave === 'function') {
-          savedTask = this.acceptance.writeReportAndSave(finalTask, {save: this.save}).task ?? finalTask;
-        } else {
-          if (closed && typeof this.acceptance.report === 'function') {
-            const report = this.acceptance.report(finalTask);
-            finalTask.reportHash = report.hash;
-          }
-          savedTask = this.save(finalTask) ?? finalTask;
-        }
+        savedTask = this.commitFinal(finalTask, closed);
       } catch (error) {
         this.runtime.abortClose?.(taskId);
         throw error;
@@ -192,12 +184,21 @@ export class TaskTransaction {
     const latest = this.repository.peek(taskId) ?? existing;
     const transitioned = transition(latest, action);
     const finalTask = {...transitioned, error: reason ?? transitioned.error};
-    if (closed && typeof this.acceptance.report === 'function') {
-      const report = this.acceptance.report(finalTask);
-      finalTask.reportHash = report.hash;
-    }
     this.event(finalTask, {kind: closed ? 'closed' : 'cancelled'});
-    return {task: this.save(finalTask), unchanged: false};
+    return {task: this.commitFinal(finalTask, closed), unchanged: false};
+  }
+
+  /**
+   * Persist the terminal record. A close writes the report and the record that
+   * carries its hash as one sequence: the report is rolled back if the save
+   * fails, so a reader can never see a new report pointing at an old task.
+   */
+  commitFinal(task, closed) {
+    if (!closed) return this.save(task) ?? task;
+    if (typeof this.acceptance?.writeReportAndSave !== 'function') {
+      throw new Error('acceptance.writeReportAndSave is required to close a task');
+    }
+    return this.acceptance.writeReportAndSave(task, {save: this.save}).task ?? task;
   }
 
   /**

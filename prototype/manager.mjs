@@ -147,8 +147,13 @@ export function createManager(options = {}) {
     baseDirectory: HERE,
   });
   // Reports, hashes, preview fingerprints, and human grants belong to the
-  // Acceptance module. The manager only injects the data directories.
-  const acceptance = new AcceptanceService({reportsDir: REPORTS, grantsDir: RUNTIME});
+  // Acceptance module. The manager only injects the data directories and the
+  // policy appendix, so no close path can write a report without it.
+  const acceptance = new AcceptanceService({
+    reportsDir: REPORTS,
+    grantsDir: RUNTIME,
+    policySection: task => executionPolicy.reportSection(task),
+  });
   const eventSequences = new Map();
   const taskChanges = new ChangeNotifier();
   const workspaceLeases = new WorkspaceLeaseManager({
@@ -572,7 +577,7 @@ export function createManager(options = {}) {
     return {id: t.id, view: 'log', path: file, ...pageOf(content, offset, limit)};
   }
   function reportPage(t, offset, limit) {
-    const content = acceptance.content(t, {policySection: executionPolicy.reportSection(t)});
+    const content = acceptance.content(t);
     return {id: t.id, view: 'report', ...pageOf(content, offset, limit)};
   }
   function event(t, data) {
@@ -730,10 +735,7 @@ export function createManager(options = {}) {
     save,
     event: (task, payload) => event(task, payload),
     workspace: workspaceLeases,
-    acceptance: {
-      revoke: task => acceptance.revoke(task),
-      report: task => acceptance.exportReport(task, {policySection: executionPolicy.reportSection(task)}),
-    },
+    acceptance,
     gracefulExitTimeoutMs: DEFAULT_EXIT_TIMEOUT_MS,
     forceExitTimeoutMs: FORCE_EXIT_TIMEOUT_MS,
     untrusted: (id, detail) => markUntrusted(id, detail),
@@ -989,7 +991,6 @@ export function createManager(options = {}) {
         const t = transition(get(a.id), 'accept');
         const accepted = acceptance.acceptAndSave(t, {
           evidence: a.evidence,
-          policySection: executionPolicy.reportSection(t),
           save,
         });
         event(accepted, {kind: 'accepted', evidence: a.evidence});
@@ -997,7 +998,7 @@ export function createManager(options = {}) {
       }
       case 'export': {
         const t = get(a.id);
-        return acceptance.exportAndSave(t, {policySection: executionPolicy.reportSection(t), save});
+        return acceptance.exportAndSave(t, {save});
       }
       case 'preview_delete': return deletionPreview(get(a.id));
       case 'grant_delete': {

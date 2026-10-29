@@ -20,11 +20,15 @@ export function sha256(value) {
 /** Default file operations; injectable so failure modes are testable. */
 export const DEFAULT_FILES = {
   existsSync: (...args) => fs.existsSync(...args),
+  lstatSync: (...args) => fs.lstatSync(...args),
   mkdirSync: (...args) => fs.mkdirSync(...args),
+  readdirSync: (...args) => fs.readdirSync(...args),
+  readFileSync: (...args) => fs.readFileSync(...args),
+  readlinkSync: (...args) => fs.readlinkSync(...args),
+  realpathSync: (...args) => fs.realpathSync(...args),
   renameSync: (...args) => fs.renameSync(...args),
   rmSync: (...args) => fs.rmSync(...args),
   writeFileSync: (...args) => fs.writeFileSync(...args),
-  readFileSync: (...args) => fs.readFileSync(...args),
 };
 
 function defaultPause(attempt) {

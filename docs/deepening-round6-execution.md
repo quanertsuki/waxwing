@@ -66,3 +66,15 @@
 - 完整测试：`274/274` 通过，37 个测试文件。
 - 发布树：`254` 个文件通过。
 - 遗留：无。
+
+#### #3 验收关闭报告原子提交接入生产
+
+状态：完成。
+
+- `src/acceptance/service.mjs`：构造时注入 `policySection(task)`，报告文本、accept/export、`writeReportAndSave` 都在模块内生成策略段；调用方不再传 `policySection`。`grant()` 先原子写授权文件，成功后才放进内存。授权恢复/删除、清单遍历、预览读取全部改走注入的 `this.files`。
+- `prototype/manager.mjs`：`AcceptanceService` 注入 `executionPolicy.reportSection`，并把整个 service 交给 `TaskTransaction`（原来只传 `{revoke, report}`）。
+- `src/tasks/transaction.mjs`：关闭只走 `commitFinal` 的原子分支，删除非原子路径；无 runtime 的关闭同样走原子分支。
+- 目标测试：`acceptance-commit.test.mjs` 3 项——`createManager` 关闭后报告包含执行策略段且 `task.json` 哈希与报告一致；真实 `AcceptanceService` + `TaskTransaction` 的关闭保存失败会回滚报告、任务停在 `stopping` 且可重试；授权文件写入失败时授权不生效、删除被拒绝且数据保留。
+- 完整测试：`277/277` 通过，38 个测试文件。
+- 发布树：`255` 个文件通过。
+- 遗留：无。
