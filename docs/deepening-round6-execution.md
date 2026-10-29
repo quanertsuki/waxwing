@@ -89,3 +89,14 @@
 - 完整测试：`282/282` 通过，39 个测试文件。
 - 发布树：`257` 个文件通过。
 - 遗留：无。
+
+#### #5 Worker 每轮按任务的 Provider 建适配器
+
+状态：完成。
+
+- 新增 `src/providers/adapter-cache.mjs`：按 Provider 配置身份缓存适配器，Provider 变化时重建，同一 Provider 连续多轮复用同一实例；解析 `apiKeyEnv` 时先复制配置，不再修改传入的 provider 对象。
+- `prototype/worker.mjs` 删除进程级 `openaiAdapter`，改用缓存模块；`createAdapter` 可注入。
+- 目标测试：`provider-adapter-cache.test.mjs` 3 项——同一 Provider 复用实例且只校验一次；不同 Provider 重建且 `cache.current` 指向新实例；调用方对象不被写入解析后的密钥，换密钥会重建。
+- 完整测试：`285/285` 通过，40 个测试文件。
+- 发布树：`259` 个文件通过。
+- 遗留：无。

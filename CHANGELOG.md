@@ -31,6 +31,9 @@ and uses semantic versioning for public releases.
   and the close reports can no longer lose the execution-policy appendix
 - A deletion grant is persisted before it is honored in memory, so a failed
   grant write cannot authorize a deletion that disappears on restart
+- The Worker builds its Provider adapter from the current round's Provider, so
+  a fallback reusing the same Worker process no longer calls the failed
+  Provider's endpoint; the provider config is copied instead of mutated
 
 ## [0.2.0] - 2026-10-28
 

@@ -42,6 +42,7 @@ interface.
 | `src/usage/module.mjs` | One usage seam: indexing, pricing, limits, override, and rework policy |
 | `src/usage/service.mjs` | Deprecated compatibility adapter; production callers use `UsageModule` |
 | `src/providers/registry.mjs` | Provider discovery and adapter selection |
+| `src/providers/adapter-cache.mjs` | One adapter per Provider identity inside a Worker process |
 | `prototype/manager.mjs` | `0.1.x` coordinator and compatibility facade |
 | `prototype/` | Legacy entry-point and data compatibility until at least `0.2.0` |
 

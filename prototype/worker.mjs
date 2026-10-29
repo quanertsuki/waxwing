@@ -9,14 +9,16 @@ import {pathToFileURL} from 'node:url';
 import {config} from './common.mjs';
 import {assertMaxTokens, budgetFileFor, writeRoundBudget} from './budget.mjs';
 import {parseOptionalEffort} from './effort.mjs';
-import {createAdapter} from '../src/providers/registry.mjs';
+import {createAdapterCache} from '../src/providers/adapter-cache.mjs';
 import {
     createRoundChannel,
     isRoundId,
 } from '../src/runtime/protocol.mjs';
 
 let harness, busy = false, closing = false;
-let openaiAdapter = null; // Lazy-init per provider config
+// Keyed by the current round's Provider: a fallback in the same Worker process
+// must not keep calling the Provider that just failed.
+const adapters = createAdapterCache();
 let activeAbort = null;
 let closeFinished = false;
 
@@ -152,16 +154,7 @@ async function runDshSdk(task, prompt, maxTokens, budgetFile) {
 
 // --- OpenAI-compatible HTTP path ---
 async function runOpenAIChat(task, prompt, maxTokens, effort, signal) {
-    // Lazy-init adapter from provider config
-    if (!openaiAdapter) {
-        const providerConfig = task.provider;
-        // Resolve API key from environment variable if specified
-        if (providerConfig.apiKeyEnv && !providerConfig.apiKey) {
-            providerConfig.apiKey = process.env[providerConfig.apiKeyEnv];
-        }
-        openaiAdapter = createAdapter(providerConfig);
-        openaiAdapter.validate();
-    }
+    const adapter = adapters.adapterFor(task.provider);
 
     send({kind: 'ready', roundId: channel.roundId, ...runtimeIdentity});
 
@@ -175,7 +168,7 @@ async function runOpenAIChat(task, prompt, maxTokens, effort, signal) {
     activeAbort = controller;
     try {
         const onEvent = event => channel.send('event', {notification: {params: {event}}});
-        const result = await openaiAdapter.run({
+        const result = await adapter.run({
             prompt,
             history: task.history || [],
             tools,
