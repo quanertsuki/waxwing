@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before common.mjs or manager.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
@@ -442,22 +442,7 @@ test('metric serialization and the index never contain message bodies, tool argu
 });
 
 function fakeFork() {
-    const child=new EventEmitter();
-    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
-    child.connected=true;child.exitCode=null;child.pid=4545;
-    child.send=message=>{queueMicrotask(()=>onMessage(message,child));};
-    child.kill=()=>{child.exitCode=0;child.emit('exit',0);};
-    return child;
-}
-function onMessage(message,child) {
-    if(message.kind==='close') {child.exitCode=0;setImmediate(()=>child.emit('exit',0));return;}
-    if(message.kind!=='run')return;
-    child.emit('message',{kind:'ready',roundId:message.roundId,ownerMarker:message.ownerMarker});
-    child.emit('message',{kind:'ack',roundId:message.roundId});
-    setImmediate(()=>{
-        child.emit('message',{kind:'result',roundId:message.roundId,text:'done',finishReason:'completed'});
-        child.emit('message',{kind:'released',roundId:message.roundId});
-    });
+    return createFakeWorker({pid: 4545});
 }
 const manager=createManager({forkWorker:fakeFork});
 let workspaceCounter=0;

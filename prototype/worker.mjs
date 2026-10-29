@@ -11,8 +11,19 @@ import {assertMaxTokens, budgetFileFor, writeRoundBudget} from './budget.mjs';
 import {parseOptionalEffort} from './effort.mjs';
 import {createAdapterCache} from '../src/providers/adapter-cache.mjs';
 import {
+    ROUND_PROTOCOL_VERSION,
+    ackMessage,
+    closeErrorMessage,
+    closedMessage,
     createRoundChannel,
-    isRoundId,
+    errorMessage,
+    eventMessage,
+    parseRunMessage,
+    protocolErrorMessage,
+    readyMessage,
+    releasedMessage,
+    resultMessage,
+    workerBusyMessage,
 } from '../src/runtime/protocol.mjs';
 
 let harness, busy = false, closing = false;
@@ -28,9 +39,9 @@ const runtimeIdentity = {
     pid: process.pid,
     startedAt: new Date().toISOString(),
     ownerMarker: process.env.WAXWING_OWNER_MARKER ?? null,
-    protocolVersion: 1,
+    protocolVersion: ROUND_PROTOCOL_VERSION,
 };
-send({kind: 'ready', ...runtimeIdentity});
+send(readyMessage(runtimeIdentity));
 
 async function finishClose() {
     if (closeFinished || busy) return;
@@ -38,9 +49,9 @@ async function finishClose() {
     activeAbort?.abort();
     try {
         await harness?.close();
-        send({kind: 'closed', roundId: null});
+        send(closedMessage());
     } catch (e) {
-        send({kind: 'close_error', roundId: null, error: String(e.message)});
+        send(closeErrorMessage({error: String(e.message)}));
         process.exitCode = 1;
     } finally {
         process.disconnect?.();
@@ -60,22 +71,26 @@ process.on('disconnect', () => { if (!closeFinished) requestClose(); });
 process.on('SIGTERM', () => { requestClose(); });
 
 process.on('message', async message => {
+    if (!message || typeof message !== 'object') return;
     if (message.kind === 'close') { requestClose(); return; }
+    // The manager only dispatches `run` and `close`; an unknown kind is ignored
+    // rather than answered, so a stray message cannot disturb the open round.
     if (message.kind !== 'run') return;
-    if (!isRoundId(message.roundId)) {
-        send({kind: 'protocol_error', error: 'run requires a valid roundId'});
+    const run = parseRunMessage(message);
+    if (!run.ok) {
+        send(protocolErrorMessage({error: run.reason}));
         return;
     }
     if (busy || closing) {
         // Never drop a run silently. The manager treats this as a protocol
         // violation and keeps the previous round active until `released`.
-        send({kind: 'worker_busy', roundId: message.roundId});
+        send(workerBusyMessage({roundId: message.roundId}));
         return;
     }
     busy = true;
     channel.begin(message.roundId);
     try {
-        channel.send('ack', {at: new Date().toISOString()});
+        channel.send('ack', ackMessage());
         const task = message.task;
         const maxTokens = assertMaxTokens(
             message.maxTokens ?? task?.maxTokens ?? config.maxTokens,
@@ -95,17 +110,16 @@ process.on('message', async message => {
             await runDshSdk(task, message.prompt, maxTokens, message.budgetFile);
         }
     } catch (e) {
-        for (const event of e.events ?? []) {
-            channel.send('event', {notification: {params: {event}}});
-        }
-        channel.send('error', {
+        // Provider events are streamed exactly once through onEvent; do not
+        // replay `e.events` here or the journal sees each message twice.
+        channel.send('error', errorMessage({
             error: String(e.message ?? e),
             finishReason: e.finishReason ?? 'error',
-        });
+        }));
     } finally {
         const finishedRound = channel.end();
         busy = false;
-        send({kind: 'released', roundId: finishedRound});
+        send(releasedMessage({roundId: finishedRound}));
         if (closing) await finishClose();
     }
 });
@@ -137,26 +151,26 @@ async function runDshSdk(task, prompt, maxTokens, budgetFile) {
             disposeEofGraceMs: 6000,
         });
         await harness.start();
-        send({kind: 'ready', roundId: channel.roundId, ...runtimeIdentity});
+        send(readyMessage({...runtimeIdentity, roundId: channel.roundId}));
     }
 
     const result = await harness.run(prompt, {
         sessionId: task.sessionId,
-        onNotification: n => channel.send('event', {notification: n}),
+        onNotification: n => channel.send('event', eventMessage(n)),
     });
 
     const ending = result.events.filter(e => e.type === 'turn/end').at(-1);
-    channel.send('result', {
+    channel.send('result', resultMessage({
         text: result.finalResponse,
         finishReason: ending?.data?.reason?.kind ?? 'unknown'
-    });
+    }));
 }
 
 // --- OpenAI-compatible HTTP path ---
 async function runOpenAIChat(task, prompt, maxTokens, effort, signal) {
     const adapter = adapters.adapterFor(task.provider);
 
-    send({kind: 'ready', roundId: channel.roundId, ...runtimeIdentity});
+    send(readyMessage({...runtimeIdentity, roundId: channel.roundId}));
 
     // Build minimal tool set: Bash + file I/O
     const tools = buildMinimalTools();
@@ -167,7 +181,7 @@ async function runOpenAIChat(task, prompt, maxTokens, effort, signal) {
     const controller = new AbortController();
     activeAbort = controller;
     try {
-        const onEvent = event => channel.send('event', {notification: {params: {event}}});
+        const onEvent = event => channel.send('event', eventMessage(event));
         const result = await adapter.run({
             prompt,
             history: task.history || [],
@@ -179,10 +193,10 @@ async function runOpenAIChat(task, prompt, maxTokens, effort, signal) {
             onEvent
         });
 
-        channel.send('result', {
+        channel.send('result', resultMessage({
             text: result.text,
             finishReason: result.finishReason
-        });
+        }));
     } finally {
         if (activeAbort === controller) activeAbort = null;
     }

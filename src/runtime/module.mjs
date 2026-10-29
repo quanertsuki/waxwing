@@ -17,8 +17,12 @@ import {randomUUID} from 'node:crypto';
 import {
   DEFAULT_ACK_TIMEOUT_MS,
   HEARTBEAT_STALE_MS,
+  ROUND_MESSAGE_KINDS,
+  closeMessage,
   createRoundId,
   isRoundId,
+  runMessage,
+  validateMessage,
 } from './protocol.mjs';
 import {RuntimeSettlement} from './settlement.mjs';
 
@@ -42,7 +46,6 @@ export function roundTimeouts(source = {}) {
   };
 }
 
-const ROUND_SCOPED_KINDS = new Set(['ack', 'heartbeat', 'event', 'result', 'error', 'released']);
 const ACTIVE_EVENT_PHASES = new Set(['running', 'awaiting_ack']);
 const DEFAULT_HEARTBEAT_CHECK_MS = 5_000;
 const DEFAULT_EXIT_TIMEOUT_MS = 14_000;
@@ -209,7 +212,7 @@ export class Runtime {
     const rec = this.records.get(id);
     if (!rec) return null;
     try {
-      if (rec.w.connected) rec.w.send({kind: 'close'});
+      if (rec.w.connected) rec.w.send(closeMessage());
       return null;
     } catch (error) {
       const detail = `close request failed: ${error.message}`;
@@ -271,16 +274,15 @@ export class Runtime {
     this.armAckTimer(rec, roundId, timeouts.ackTimeoutMs);
     this.armHeartbeatWatch(rec, roundId, timeouts.heartbeatStaleMs, timeouts.heartbeatCheckMs);
     if (Number(timeouts.roundTimeoutMs) > 0) this.armRoundTimer(rec, roundId, timeouts.roundTimeoutMs);
-    const message = {
-      kind: 'run',
+    const message = runMessage({
       roundId,
       task,
       prompt: options.prompt,
       maxTokens: options.maxTokens,
       effort: options.effort ?? null,
       ownerMarker: rec.ownerMarker,
-    };
-    if (options.budgetFile) message.budgetFile = options.budgetFile;
+      budgetFile: options.budgetFile,
+    });
     try {
       rec.w.send(message);
     } catch (error) {
@@ -343,6 +345,17 @@ export class Runtime {
     const rec = this.records.get(taskId);
     if (!rec) return;
 
+    const checked = validateMessage(msg);
+    if (!checked.ok) {
+      this.noteIgnored(task, rec, msg, checked.reason);
+      return;
+    }
+    if (msg.kind === 'closed') {
+      // The Worker finished its own close; process exit remains the gate.
+      rec.workerClosed = true;
+      return;
+    }
+
     if (msg.kind === 'ready') {
       if (msg.ownerMarker && msg.ownerMarker !== rec.ownerMarker) {
         rec.unreworkableReason = 'Runtime identity marker did not match; create a new task';
@@ -383,7 +396,7 @@ export class Runtime {
       return;
     }
 
-    if (ROUND_SCOPED_KINDS.has(msg.kind)) {
+    if (ROUND_MESSAGE_KINDS.has(msg.kind)) {
       if (!isRoundId(msg.roundId) || msg.roundId !== rec.roundId) {
         this.noteIgnored(task, rec, msg, 'roundId does not match the active round');
         return;

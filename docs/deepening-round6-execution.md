@@ -174,3 +174,16 @@
 - 完整测试：`315/315` 通过，44 个测试文件。
 - 发布树：`263` 个文件通过。
 - 遗留：`src/app.mjs` 尚未导出目录（`prototype/` 是它的两个调用方）；`grant_delete` 是否对网关调用方额外限制，仍需权儿决定。
+
+#### #10 轮次协议只有一个 Module
+
+状态：完成。
+
+- `src/runtime/protocol.mjs`：消息分为轮次消息（`ack`/`event`/`heartbeat`/`result`/`error`/`worker_busy`/`released`）和控制消息（`ready`/`close`/`closed`/`close_error`/`protocol_error`）；每种消息都有构造器，`validateMessage` 统一检查对象形状、未知 kind、协议版本、轮次消息的合法 `roundId`、event 的 notification 和 error 字符串；`parseRunMessage` 在 Worker 侧校验 run；`eventMessage` 把 DSH SDK 的 `{method, params:{event}}` 与 OpenAI 适配器的裸事件统一成一种嵌套 `session.event`；心跳改用 `heartbeatMessage`。
+- `prototype/worker.mjs`：`runtimeIdentity.protocolVersion` 取自协议模块，ready/close/closed/close_error/ack/result/error/released/worker_busy 都由构造器生成；非法 run 回 `protocol_error`，忙时回 `worker_busy`；未知或非对象消息直接忽略，和旧行为一致；错误路径不再补发 `e.events`，Provider 事件只经 `onEvent` 流式发送一次。
+- `src/runtime/module.mjs`：`sendClose`、`openRound` 使用协议构造器；`onMessage` 先 `validateMessage`，非法消息记为 `runtime_message_ignored`（带 kind、roundId、期望 roundId 和原因）；`closed` 只标记 `workerClosed`，进程退出仍是唯一放行条件；轮次消息集合改由协议模块提供，删除本地 `ROUND_SCOPED_KINDS`。
+- `prototype/usage.mjs`：在重复 message id 分支注明这是对旧 worker 和损坏日志的防御，正常流式路径每个 id 只出现一次。
+- 目标测试：新增 `round-protocol.test.mjs` 3 项——run 消息带版本且按版本/形状解析，全部 13 种消息各有合法样例且非法样例被拒（含版本不符），两种 Provider 事件包装归一；新增 `round-flow.test.mjs` 2 项——假 Worker 走完 run → ack → events → result → released，`events.jsonl` 序号从 1 连续且不重复、每个 Provider message id 只出现一次；失败路径同样只出现一次。九个测试文件的手写假 Worker 合并为 `prototype/tests/fake-worker.mjs`，消息全部由协议构造器生成。
+- 完整测试：`320/320` 通过，45 个测试文件。
+- 发布树：`266` 个文件通过。
+- 遗留：`validateMessage` 仍接受不带 `protocolVersion` 的消息（兼容旧 Worker），只在版本出现且不符时拒绝；若后续要求严格版本，需要同时升级 Worker 与 manager 并保留一段兼容期。

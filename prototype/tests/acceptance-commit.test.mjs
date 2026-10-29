@@ -2,7 +2,7 @@
 // a deletion grant only exists on disk before it exists in memory.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,27 +27,7 @@ function workspace(name) {
 
 /** Worker that acknowledges, completes, and exits on close. */
 function fakeFork() {
-  const child = new EventEmitter();
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.connected = true;
-  child.exitCode = null;
-  child.pid = 4343;
-  child.send = message => queueMicrotask(() => {
-    if (message.kind === 'close') {
-      child.exitCode = 0;
-      setImmediate(() => child.emit('exit', 0));
-      return;
-    }
-    if (message.kind !== 'run') return;
-    child.emit('message', {kind: 'ready', roundId: message.roundId, ownerMarker: message.ownerMarker});
-    child.emit('message', {kind: 'ack', roundId: message.roundId});
-    setImmediate(() => {
-      child.emit('message', {kind: 'result', roundId: message.roundId, text: 'done', finishReason: 'completed'});
-      child.emit('message', {kind: 'released', roundId: message.roundId});
-    });
-  });
-  return child;
+  return createFakeWorker({pid: 4343});
 }
 
 async function settle(manager, id) {

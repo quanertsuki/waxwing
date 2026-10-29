@@ -52,6 +52,16 @@ and uses semantic versioning for public releases.
   unchanged. `TaskCommandModule` now validates create only and no longer
   exposes `validateRework`/`rework`; the lifecycle status rules moved out of
   `AcceptanceService` as well
+- The round protocol is one definition for both processes:
+  `src/runtime/protocol.mjs` builds and validates every message (run, ready,
+  ack, event, heartbeat, result, error, worker_busy, released, close, closed,
+  close_error, protocol_error), checks the protocol version, and normalizes both
+  Provider event wrappers into one nested `session.event`. The manager rejects
+  malformed, unknown, or unversioned messages before acting and records them as
+  `runtime_message_ignored`; the Worker reports a bad run message as
+  `protocol_error` and no longer replays `error.events` after a failed round.
+  Tests use one shared fake Worker (`prototype/tests/fake-worker.mjs`) built from
+  the same constructors instead of nine hand-written fakes
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and

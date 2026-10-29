@@ -1,7 +1,7 @@
 // One paging rule for the manager's status views and the research report.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,27 +57,7 @@ test('an offset past the end clamps to an empty final page', () => {
 
 /** A worker that completes one round immediately. */
 function fakeFork() {
-  const child = new EventEmitter();
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.connected = true;
-  child.exitCode = null;
-  child.pid = 4545;
-  child.send = message => queueMicrotask(() => {
-    if (message.kind === 'close') {
-      child.exitCode = 0;
-      setImmediate(() => child.emit('exit', 0));
-      return;
-    }
-    if (message.kind !== 'run') return;
-    child.emit('message', {kind: 'ready', roundId: message.roundId, ownerMarker: message.ownerMarker});
-    child.emit('message', {kind: 'ack', roundId: message.roundId});
-    setImmediate(() => {
-      child.emit('message', {kind: 'result', roundId: message.roundId, text: 'done', finishReason: 'completed'});
-      child.emit('message', {kind: 'released', roundId: message.roundId});
-    });
-  });
-  return child;
+  return createFakeWorker({pid: 4545});
 }
 
 function researchReport(root) {

@@ -25,7 +25,7 @@ interface.
 | `src/view/page.mjs` | One paging rule: bounds, surrogate-pair safety, `nextOffset`, `complete` |
 | `src/workspace/lease-manager.mjs` | Exclusive workspace leases, overlap checks, cleanup |
 | `src/workspace/git.mjs` | Git probes, base commits, worktrees, status, diff, branches |
-| `src/runtime/protocol.mjs` | Round IDs, message validation, heartbeat constants |
+| `src/runtime/protocol.mjs` | Round IDs, every message constructor and validator shared by manager and Worker, the round-scoped message set, heartbeat constants |
 | `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff; owns the release and exit gates; a handle is retained until `forget`, so a failed final save stays retryable |
 | `src/runtime/settlement.mjs` | One projection from every runtime fact (terminal, startup failure, fallback failure, ACK timeout, process error/exit, close, restart identity) to the task status, event, lease conclusion, and handle decision |
 | `src/runtime/lifecycle.mjs` | Deprecated compatibility facade over `RuntimeSettlement`; removal at 0.3.0 |
@@ -56,7 +56,10 @@ task state directly.
 The release safety net discovers its inputs instead of listing them: the test
 runner imports every `prototype/tests/*.test.mjs`, the release check requires
 every `src/**/*.mjs`, and the portable desktop backend copies exactly the
-`prototype/` files `package.json` publishes.
+`prototype/` files `package.json` publishes. Tests build Worker messages through
+the same protocol module: `prototype/tests/fake-worker.mjs` is the only
+spawned-process fixture, so a protocol change breaks one file instead of nine
+hand-written copies.
 
 The operation catalogue is the single source for the loopback gateway, CLI, and
 MCP tool surface. It declares each operation's fields, bounds, defaults, entry
@@ -187,6 +190,11 @@ manager                         worker
 ```
 
 - A busy Worker Agent returns `worker_busy`; it never silently drops a run.
+- Every message is built and validated by `src/runtime/protocol.mjs`. The
+  Worker normalizes both Provider event wrappers into one nested
+  `session.event`, and the manager rejects an unknown kind, a different
+  protocol version, or a round message without a valid `roundId` before it is
+  acted on. A rejected message is recorded as `runtime_message_ignored`.
 - The manager records but ignores old, duplicate, or late messages whose
   `roundId` does not match the active lease.
 - Every task event has a monotonic `sequence` and a `roundId`.

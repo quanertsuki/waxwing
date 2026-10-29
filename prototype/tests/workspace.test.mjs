@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
@@ -40,30 +40,7 @@ function makeRepo(name) {
   return repo;
 }
 function fakeFork() {
-  const child=new EventEmitter();
-  child.stdout=new EventEmitter();
-  child.stderr=new EventEmitter();
-  child.connected=true;
-  child.exitCode=null;
-  child.signalCode=null;
-  child.pid=5100;
-  child.send=message=>queueMicrotask(()=>onMessage(message,child));
-  child.kill=()=>{child.exitCode=0;child.emit('exit',0);};
-  return child;
-}
-function onMessage(message,worker) {
-  if(message.kind==='close') {
-    worker.exitCode=0;
-    setImmediate(()=>worker.emit('exit',0));
-    return;
-  }
-  if(message.kind!=='run')return;
-  worker.emit('message',{kind:'ready',roundId:message.roundId,ownerMarker:message.ownerMarker});
-  worker.emit('message',{kind:'ack',roundId:message.roundId});
-  setImmediate(()=>{
-    worker.emit('message',{kind:'result',roundId:message.roundId,text:'done',finishReason:'completed'});
-    worker.emit('message',{kind:'released',roundId:message.roundId});
-  });
+  return createFakeWorker({pid: 5100});
 }
 
 const manager=createManager({forkWorker:fakeFork});

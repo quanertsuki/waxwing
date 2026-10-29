@@ -386,6 +386,8 @@ function addAssistant(index,event,outer,task) {
     if (id) {
         const existing=index.responses.findIndex(entry=>entry.id===id);
         if (existing>=0) {
+            // The Worker streams each event once; this stays as a defensive
+            // guard for old workers and damaged journals with a replayed line.
             index.duplicates++;
             // Keep the latest record and its latest event position so the usage
             // view is ordered by the occurrence that survived deduplication.
