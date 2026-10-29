@@ -76,8 +76,37 @@ function parsePort(value) {
 }
 
 /**
+ * Resolve which local-override file is in effect.
+ *
+ * The file must not live inside the install directory: a portable update
+ * replaces `resources/backend/prototype/` and `npm update` replaces the
+ * package, so settings saved there would be lost. The platform data root is
+ * computed from `WAXWING_HOME` or the OS default only — never from the
+ * configured `root` — so this cannot depend on the value being resolved.
+ *
+ * Order: explicit environment override, the new per-user location, then the
+ * legacy file beside `config.json` (read-only fallback). When no file exists,
+ * the new location is returned so the next save lands there.
+ *
+ * @returns {{path: string, source: 'env'|'home'|'legacy'|null}}
+ */
+export function resolveLocalConfigPath({
+  explicit,
+  home,
+  legacy,
+  exists = fs.existsSync,
+} = {}) {
+  if (explicit) return {path: path.resolve(explicit), source: 'env'};
+  if (exists(home)) return {path: path.resolve(home), source: 'home'};
+  if (exists(legacy)) return {path: path.resolve(legacy), source: 'legacy'};
+  return {path: path.resolve(home), source: null};
+}
+
+/**
  * Load the public config, optional git-ignored local overrides, and environment
- * overrides. Relative filesystem paths are anchored at the config directory.
+ * overrides. A relative path in `config.json` is anchored at the config
+ * directory; a relative path in the local override is anchored at that file's
+ * own directory, which may now be the per-user data directory.
  *
  * This module intentionally has no repository-specific defaults beyond a
  * sibling DSH checkout and a data directory beside the project.
@@ -87,9 +116,16 @@ export function loadConfiguration({here = DEFAULT_HERE, env = process.env} = {})
     ? path.resolve(env.WAXWING_CONFIG || env.DSH_SUBAGENT_CONFIG)
     : path.join(here, 'config.json');
   const configDir = path.dirname(configPath);
-  const localConfigPath = (env.WAXWING_LOCAL_CONFIG || env.DSH_SUBAGENT_LOCAL_CONFIG)
-    ? path.resolve(env.WAXWING_LOCAL_CONFIG || env.DSH_SUBAGENT_LOCAL_CONFIG)
-    : path.join(configDir, 'config.local.json');
+  const local = resolveLocalConfigPath({
+    explicit: env.WAXWING_LOCAL_CONFIG || env.DSH_SUBAGENT_LOCAL_CONFIG,
+    home: path.join(platformDataRoot(env), 'config.local.json'),
+    legacy: path.join(configDir, 'config.local.json'),
+  });
+  const localConfigPath = local.path;
+  // The file's own directory is the anchor for its relative paths. For the
+  // legacy location this equals the config directory, so old files keep their
+  // existing meaning.
+  const localBaseDir = path.dirname(localConfigPath);
 
   const publicConfig = readJsonFile(configPath, 'configuration');
   const localConfig = path.resolve(localConfigPath) === path.resolve(configPath)
@@ -97,51 +133,62 @@ export function loadConfiguration({here = DEFAULT_HERE, env = process.env} = {})
     : readJsonFile(localConfigPath, 'local configuration');
   const merged = mergeConfig(publicConfig, localConfig);
 
-  const dshRepo = resolveConfigPath(firstDefined(
-    env.WAXWING_DSH_REPO,
-    env.DSH_SUBAGENT_DSH_REPO,
-    env.DSH_REPO,
-    merged.dshRepo,
+  /**
+   * Resolve one path-valued key from the file that supplied it: an environment
+   * value is anchored at the config directory, a local override at the local
+   * file, and a public value at `config.json`.
+   */
+  function anchor(envNames, key, fallback) {
+    const fromEnvironment = firstDefined(...envNames.map(name => env[name]));
+    if (fromEnvironment !== undefined) return resolveConfigPath(fromEnvironment, configDir);
+    if (firstDefined(merged[key]) !== undefined) {
+      return resolveConfigPath(merged[key], Object.hasOwn(localConfig, key) ? localBaseDir : configDir);
+    }
+    return resolveConfigPath(fallback, configDir);
+  }
+
+  const dshRepo = anchor(
+    ['WAXWING_DSH_REPO', 'DSH_SUBAGENT_DSH_REPO', 'DSH_REPO'],
+    'dshRepo',
     path.join(here, '..', 'deepseek-harness'),
-  ), configDir);
-  const rootValue = firstDefined(
-    env.WAXWING_HOME,
-    env.DSH_SUBAGENT_ROOT,
-    env.DSH_PROTOTYPE_ROOT,
-    merged.root,
+  );
+  const root = anchor(
+    ['WAXWING_HOME', 'DSH_SUBAGENT_ROOT', 'DSH_PROTOTYPE_ROOT'],
+    'root',
     platformDataRoot(env),
   );
-  const root = resolveConfigPath(rootValue, configDir);
-  const researchRoot = resolveConfigPath(firstDefined(
-    env.WAXWING_RESEARCH_ROOT,
-    merged.researchRoot,
+  const researchRoot = anchor(
+    ['WAXWING_RESEARCH_ROOT'],
+    'researchRoot',
     `${root}-research`,
-  ), configDir);
+  );
   const rootExplicit = Boolean(firstDefined(
     env.WAXWING_HOME,
     env.DSH_SUBAGENT_ROOT,
     env.DSH_PROTOTYPE_ROOT,
     merged.root,
   ));
-  const credentialsFile = resolveConfigPath(firstDefined(
-    env.WAXWING_CREDENTIALS_FILE,
-    env.DSH_SUBAGENT_CREDENTIALS_FILE,
-    env.DSH_CREDENTIALS_FILE,
-    merged.credentialsFile,
+  const credentialsFile = anchor(
+    ['WAXWING_CREDENTIALS_FILE', 'DSH_SUBAGENT_CREDENTIALS_FILE', 'DSH_CREDENTIALS_FILE'],
+    'credentialsFile',
     path.join(dshRepo, 'data', '.credentials.yaml'),
-  ), configDir);
-  const providersDir = resolveConfigPath(firstDefined(
-    env.WAXWING_PROVIDERS_DIR,
-    env.DSH_SUBAGENT_PROVIDERS_DIR,
-    merged.providersDir,
+  );
+  const providersDir = anchor(
+    ['WAXWING_PROVIDERS_DIR', 'DSH_SUBAGENT_PROVIDERS_DIR'],
+    'providersDir',
     path.join(root, 'providers'),
-  ), configDir);
-  const node = resolveExecutable(firstDefined(
+  );
+  const nodeFromEnvironment = firstDefined(
     env.WAXWING_NODE,
     env.DSH_SUBAGENT_NODE,
     env.DSH_PROTOTYPE_NODE,
-    merged.node,
-  ), configDir);
+  );
+  const node = nodeFromEnvironment !== undefined
+    ? resolveExecutable(nodeFromEnvironment, configDir)
+    : resolveExecutable(
+      firstDefined(merged.node, ''),
+      Object.hasOwn(localConfig, 'node') ? localBaseDir : configDir,
+    );
   const port = parsePort(firstDefined(
     env.WAXWING_PORT,
     env.DSH_SUBAGENT_PORT,
@@ -165,5 +212,7 @@ export function loadConfiguration({here = DEFAULT_HERE, env = process.env} = {})
     },
     configPath,
     localConfigPath,
+    /** Which file supplied the local overrides (`null` when none exists). */
+    localConfigSource: local.source,
   };
 }

@@ -1,6 +1,15 @@
 use crate::paths;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
+
+const PATH_KEYS: [&str; 5] = [
+    "root",
+    "researchRoot",
+    "dshRepo",
+    "credentialsFile",
+    "providersDir",
+];
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +40,42 @@ fn default_settings() -> Settings {
             warn_requests: 100,
             block_requests: 160,
         },
+    }
+}
+
+/// A legacy local file may store relative paths. Writing it to the per-user
+/// directory would resolve them against a different base, so convert each one
+/// to an absolute path against the directory the old file lived in. This
+/// mirrors `prototype/config.mjs`: `node` stays a bare command unless it
+/// contains a path separator.
+fn absolutize_paths(config: &mut Map<String, Value>, base_dir: &Path) {
+    for key in PATH_KEYS {
+        let value = match config.get(key) {
+            Some(Value::String(value)) if !value.trim().is_empty() => value.trim().to_string(),
+            _ => continue,
+        };
+        let path = PathBuf::from(&value);
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            base_dir.join(path)
+        };
+        config.insert(
+            key.to_string(),
+            Value::String(resolved.to_string_lossy().into_owned()),
+        );
+    }
+
+    if let Some(Value::String(value)) = config.get("node") {
+        let value = value.trim();
+        let path = PathBuf::from(value);
+        if !value.is_empty() && !path.is_absolute() && (value.contains('/') || value.contains('\\'))
+        {
+            config.insert(
+                "node".to_string(),
+                Value::String(base_dir.join(path).to_string_lossy().into_owned()),
+            );
+        }
     }
 }
 
@@ -74,8 +119,12 @@ pub async fn get_settings() -> Result<Settings, String> {
 
 #[tauri::command]
 pub async fn save_settings(settings: Settings) -> Result<(), String> {
-    let path = paths::local_config_path()?;
-    let mut config = paths::read_json_object(&path)?;
+    let location = paths::local_config_location()?;
+    let write_path = paths::local_config_write_path(&location)?;
+    let mut config = paths::read_json_object(&location.path)?;
+    // Relative paths in a legacy file are reinterpreted before the move, so
+    // they keep pointing at the same directories afterwards.
+    absolutize_paths(&mut config, &location.base_dir);
     let mut usage_limits = config
         .get("usageLimits")
         .and_then(Value::as_object)
@@ -112,7 +161,50 @@ pub async fn save_settings(settings: Settings) -> Result<(), String> {
     );
     config.insert("usageLimits".to_string(), Value::Object(usage_limits));
 
-    paths::write_json_object(&path, &config)?;
+    paths::write_json_object(&write_path, &config)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_makes_relative_paths_absolute_without_moving_targets() {
+        let base = Path::new("C:/waxwing/prototype");
+        let absolute = std::env::current_dir().unwrap().join("absolute.yaml");
+        let mut config = serde_json::json!({
+            "root": "../data",
+            "providersDir": "./providers",
+            "credentialsFile": absolute.to_string_lossy(),
+            "node": "./bin/node.exe",
+            "defaultProvider": "dsh-sdk"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+
+        absolutize_paths(&mut config, base);
+
+        let expected = |value: &str| Value::String(base.join(value).to_string_lossy().into_owned());
+        assert_eq!(config["root"], expected("../data"));
+        assert_eq!(config["providersDir"], expected("./providers"));
+        assert_eq!(
+            config["credentialsFile"],
+            Value::String(absolute.to_string_lossy().into_owned())
+        );
+        assert_eq!(config["node"], expected("./bin/node.exe"));
+        assert_eq!(config["defaultProvider"], "dsh-sdk");
+    }
+
+    #[test]
+    fn a_bare_node_command_is_not_anchored() {
+        let mut config = serde_json::json!({"node": "node"})
+            .as_object()
+            .cloned()
+            .unwrap();
+        absolutize_paths(&mut config, Path::new("C:/waxwing/prototype"));
+        assert_eq!(config["node"], "node");
+    }
 }

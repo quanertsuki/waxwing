@@ -235,10 +235,14 @@ These comparisons are architectural, not claims about feature parity.
 
 The default data root is `%LOCALAPPDATA%\Waxwing` on Windows,
 `~/Library/Application Support/Waxwing` on macOS, and
-`$XDG_DATA_HOME/waxwing` on Linux. `WAXWING_HOME` overrides it.
+`$XDG_DATA_HOME/waxwing` on Linux. `WAXWING_HOME` overrides it. `config.local.json` lives here so a portable or
+package update cannot overwrite local settings; the older
+`prototype/config.local.json` beside `config.json` is still read when the new
+file is absent, and the desktop migrates it on the next save.
 
 ```text
 Waxwing/
+  config.local.json
   runs/<task-id>/
     task.json
     events.jsonl

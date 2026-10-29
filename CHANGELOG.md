@@ -20,6 +20,13 @@ and uses semantic versioning for public releases.
 - Task status views and research reports share one paging rule: an offset past
   the end clamps to an empty final page, an offset inside a surrogate pair is
   rejected, and every page reports `complete`
+- The local override (`config.local.json`) now lives in the per-user data
+  directory instead of beside `config.json`, so a portable-archive or npm
+  update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and
+  an older `prototype/config.local.json` remains a read-only fallback. Relative
+  paths in the override resolve against the file that contains them; a desktop
+  save moves a legacy file to the new location with its relative paths made
+  absolute
 
 ### Fixed
 

@@ -100,3 +100,16 @@
 - 完整测试：`285/285` 通过，40 个测试文件。
 - 发布树：`259` 个文件通过。
 - 遗留：无。
+
+#### #17 本地配置移出安装目录
+
+状态：完成。
+
+- `prototype/config.mjs`：新增 `resolveLocalConfigPath`，顺序为 `WAXWING_LOCAL_CONFIG` / `DSH_SUBAGENT_LOCAL_CONFIG` → `<平台数据目录>/config.local.json` → `config.json` 同目录旧文件；新位置有文件时不再读旧文件。平台数据目录只由 `WAXWING_HOME` 或系统默认值决定，不读配置里的 `root`。返回值新增 `localConfigSource`（`env`/`home`/`legacy`/`null`）。
+- 相对路径按来源分层：本地文件里的 `root`、`researchRoot`、`dshRepo`、`credentialsFile`、`providersDir`、`node` 以该文件所在目录为基准；`config.json` 与环境变量保持原有基准。
+- `desktop/src-tauri/src/paths.rs`：`local_config_location` 按同一顺序解析，新增 `LocalConfigSource`/`LocalConfigLocation`；`platform_data_root` 不读配置；`config_value_base` 让 `root`、`providersDir`、`node` 按来源分层解析。
+- `desktop/src-tauri/src/settings.rs`：保存时读当前生效的本地文件，把其中的相对路径转成绝对路径（`node` 裸命令保持原样），写入新位置；旧文件只读、不删除。
+- 目标测试：Node 5 项（共享表、新位置相对基准、旧位置基准、新文件遮蔽旧文件、显式文件独占）+ Rust 4 项（同一张共享表的本地配置路径、旧文件保存目标、迁移绝对化、裸 `node` 命令）。共享表在 `prototype/tests/fixtures/local-config-location.json`，Node 用 `loadConfiguration`、Rust 用 `local_config_location_from_parts` 各自读取。
+- 完整测试：`290/290` 通过，40 个测试文件；Rust `15/15` 通过。
+- 发布树：`260` 个文件通过。
+- 遗留：Rust 侧没有实现 `researchRoot`/`credentialsFile` 的解析（原状），#14 会让 Rust 不再解析配置。
