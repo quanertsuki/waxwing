@@ -38,10 +38,13 @@ interface.
 | `src/research/capture.mjs` | Terminal result/error capture isolated per shard |
 | `src/research/report.mjs` | Aggregate report projection, atomic write, hash, and paging |
 | `src/research/service.mjs` | Compatibility facade: parallel shards, scratch workspaces, serialized refresh, partial results |
-| `src/usage/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
+| `src/tasks/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
+| `src/usage/execution-policy.mjs` | Deprecated forwarding import; removal at 0.3.0 |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
-| `src/usage/module.mjs` | One usage seam: indexing, pricing, limit inheritance, threshold evaluation, and the one-round override decision |
+| `src/usage/metrics.mjs` | Usage metrics only: pricing, the incremental event index, and cost projection; no limits and no global configuration |
+| `src/usage/module.mjs` | One usage seam: metrics plus limit inheritance, threshold evaluation, list flags, and the one-round override decision |
 | `src/usage/service.mjs` | Deprecated compatibility adapter; production callers use `UsageModule` |
+| `prototype/usage.mjs` | Legacy usage entry point forwarding to metrics and the module |
 | `src/providers/registry.mjs` | Provider discovery, built-in provider names, adapter selection, declared capabilities, and task preparation |
 | `prototype/providers/base.mjs` | Provider adapter interface: one round in, bare DSH-format events out, declarative capabilities |
 | `prototype/providers/dsh-sdk.mjs` | DSH SDK adapter: one long-lived harness session, the task runtime patch, and the per-round budget file |

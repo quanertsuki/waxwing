@@ -22,32 +22,29 @@ const LIMITS = {
   blockRequests: 3,
 };
 
-function snapshotFor(limitState, limits) {
-  const internalRequests = limitState === 'blocked' ? 3 : limitState === 'warning' ? 2 : 1;
+/** Metrics only: the module evaluates LIMITS over these numbers. */
+function metricsFor(limitState) {
+  const requests = limitState === 'blocked' ? 3 : limitState === 'warning' ? 2 : 1;
   return {
-    statusUsage: {
-      available: true,
-      internalRequests,
-      requests: internalRequests,
-      requestsWithoutUsage: 0,
-      estimatedCostCny: 1,
-      costComplete: true,
-      limitState,
-      limits,
-    },
-    usageRounds: [],
-    listUsage: {available: true, requests: internalRequests},
-    computed: {},
+    metricsForTask: () => ({
+      statusUsage: {
+        available: true,
+        requests,
+        requestsWithoutUsage: 0,
+        estimatedCostCny: 1,
+        costComplete: true,
+        warnings: [],
+      },
+      usageRounds: [],
+      computed: {},
+    }),
   };
 }
 
 function usageFor(limitState) {
   return new UsageModule({
     configuration: LIMITS,
-    operations: {
-      usageForTask: (_task, _directory, options) =>
-        snapshotFor(limitState, options.limits ?? LIMITS),
-    },
+    metrics: metricsFor(limitState),
     now: () => '2026-10-29T00:00:00.000Z',
   });
 }
@@ -246,10 +243,10 @@ test('rework validates request fields before reading metrics or mutating the tas
   const calls = [];
   const usage = new UsageModule({
     configuration: LIMITS,
-    operations: {
-      usageForTask() {
+    metrics: {
+      metricsForTask() {
         calls.push('metrics');
-        return snapshotFor('ok', LIMITS);
+        return metricsFor('ok').metricsForTask();
       },
     },
   });

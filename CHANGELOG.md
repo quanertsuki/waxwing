@@ -73,6 +73,15 @@ and uses semantic versioning for public releases.
   `openaiToAnthropic`, `mapStopReason`, `estimateTokens`, `message.signal`) are
   removed. `AdapterCache.closeAll()` releases every adapter a Worker built,
   including one replaced by a Provider fallback
+- Usage metrics and limits are separate: `src/usage/metrics.mjs` owns pricing,
+  the incremental event index, and cost projection, while `UsageModule` is the
+  only place a request limit is evaluated and now also answers the list flags
+  and status warnings the manager used to derive. `prototype/usage.mjs` is a
+  forwarding legacy entry point, `ExecutionPolicy` moved to
+  `src/tasks/execution-policy.mjs` (the old path forwards until 0.3.0), and
+  `fullPricing` now selects the pricing source that knows the task model
+  instead of the first source. `UsageService` and the module's unused
+  re-exports are marked deprecated
 - The local override (`config.local.json`) now lives in the per-user data
   directory instead of beside `config.json`, so a portable-archive or npm
   update cannot replace saved settings. `WAXWING_LOCAL_CONFIG` still wins, and

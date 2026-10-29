@@ -11,9 +11,8 @@ import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnviron
 import {transition} from '../src/tasks/lifecycle.mjs';
 import {budgetFileFor, resolveRoundBudget} from './budget.mjs';
 import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
-import {effectiveLimits} from '../src/usage/policy.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
-import {ExecutionPolicy} from '../src/usage/execution-policy.mjs';
+import {ExecutionPolicy} from '../src/tasks/execution-policy.mjs';
 import {capabilitiesFor, prepareTask, resolveProvider} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {RuntimeSettlement} from '../src/runtime/settlement.mjs';
@@ -140,8 +139,11 @@ export function createManager(options = {}) {
   let shuttingDown = false;
 
   const usageModule = new UsageModule({
-    configuration: config.usageLimits,
-    limitsForTask: task => effectiveLimits(task?.usageLimits, config.usageLimits),
+    configuration: {
+      limits: config.usageLimits,
+      providersDir: config.providersDir,
+      pricingFile: path.join(HERE, 'pricing.json'),
+    },
   });
 
   const directory = id => repository.directory(id);
@@ -400,16 +402,16 @@ export function createManager(options = {}) {
   }
   /** Default status: bounded progress plus a short preview, never full history. */
   function statusSummary(t) {
-    // One usage computation supplies both the compact item and status.usage.
-    const snapshot = usageSnapshot(t);
-    const base = compactTask(t, true, snapshot.listUsage);
     const last = t.rounds.at(-1);
+    // One usage computation supplies both the compact item and status.usage.
+    // The last round's policy notice is a status warning, not a list flag.
+    const snapshot = usageSnapshot(t, {
+      extraWarnings: last?.policy?.warning ? [last.policy.warning] : [],
+    });
+    const base = compactTask(t, true, snapshot.listUsage);
     const resultText = latestResultText(t);
     const preview = clip(resultText, PREVIEW_LIMIT);
     const statusUsage = snapshot.statusUsage;
-    if (last?.policy?.warning) {
-      statusUsage.warnings = [...new Set([...(statusUsage.warnings ?? []), last.policy.warning])];
-    }
     const reworkBlocked = rework.blockedReason(t, statusUsage);
     const summary = taskSummaryView(t, {
       listView: base,
@@ -840,9 +842,9 @@ export function createManager(options = {}) {
       return [...repository.values()].map(t => {
         const snapshot = usageSnapshot(t);
         const item = compactTask(t, false, snapshot.listUsage);
-        if (snapshot.statusUsage.limitState === 'blocked') item.limitBlocked = true;
-        else if (snapshot.statusUsage.limitState === 'warning' ||
-          snapshot.statusUsage.limitState === 'unavailable') item.limitWarning = true;
+        const flags = usageModule.listFlags(snapshot);
+        if (flags.limitBlocked) item.limitBlocked = true;
+        else if (flags.limitWarning) item.limitWarning = true;
         return item;
       });
     },

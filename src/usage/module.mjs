@@ -10,12 +10,7 @@ import {
   unavailableUsageSnapshot,
   unavailableUsageView,
 } from './policy.mjs';
-import {
-  usageForList,
-  usageForStatus,
-  usageForTask,
-  usageForView,
-} from '../../prototype/usage.mjs';
+import {listSummaryOf, metricsForTask, usageViewFor} from './metrics.mjs';
 
 function boundedError(error, max = 240) {
   const text = error?.message ?? String(error);
@@ -28,26 +23,30 @@ function boundedError(error, max = 240) {
  * should not have to compose their internal ordering.
  */
 export class UsageModule {
+  /**
+   * @param configuration - the global limits object, or
+   *   `{limits, providersDir, pricingFile}` for the manager.
+   * @param metrics - injectable metrics operations: `metricsForTask` and
+   *   `usageViewFor`; both default to the real metrics module.
+   */
   constructor({
     configuration = {},
-    operations = {},
-    limitsForTask = task => effectiveLimits(task?.usageLimits, configuration),
+    limits = configuration?.limits ?? configuration,
+    providersDir = configuration?.providersDir ?? null,
+    pricingFile = configuration?.pricingFile ?? null,
+    metrics = {},
     now = () => new Date().toISOString(),
   } = {}) {
     this.configuration = configuration;
-    this.operations = {
-      usageForTask,
-      usageForList,
-      usageForStatus,
-      usageForView,
-      ...operations,
-    };
-    this.limitsForTask = limitsForTask;
+    this.limitsConfig = limits;
+    this.providersDir = providersDir;
+    this.pricingFile = pricingFile;
+    this.metrics = {metricsForTask, usageViewFor, ...metrics};
     this.now = now;
   }
 
   limits(task) {
-    return this.limitsForTask(task);
+    return effectiveLimits(task?.usageLimits, this.limitsConfig);
   }
 
   blockedReason(usage) {
@@ -63,9 +62,9 @@ export class UsageModule {
   }
 
   /**
-   * Never throws: limits are resolved once and passed into the metrics
-   * operation, and a damaged task limit override degrades to the configured
-   * fallback instead of escaping.
+   * Compute metrics once, then evaluate this request's limits inside the
+   * module. Never throws: a damaged limit override or an unreadable event
+   * source degrades to an explicit fallback instead of escaping.
    */
   snapshot(task, taskDirectory, options = {}) {
     let limits = options.limits;
@@ -73,13 +72,41 @@ export class UsageModule {
       try {
         limits = this.limits(task);
       } catch {
-        // A damaged task override must not hide the metrics behind a limits
-        // error; continue with the configured fallback limit set.
         limits = this.fallbackLimits();
       }
     }
     try {
-      return this.operations.usageForTask(task, taskDirectory, {...options, limits});
+      const computed = this.metrics.metricsForTask(task, taskDirectory, {
+        pricingFile: this.pricingFile,
+        providersDir: this.providersDir,
+        ...options,
+      });
+      const evaluation = evaluateLimits(computed.statusUsage, limits);
+      const {message, ...limitFields} = evaluation;
+      // Status-only warnings (such as the last round's policy notice) join the
+      // limit message here; the list summary keeps the metrics warnings alone.
+      const extraWarnings = Array.isArray(options.extraWarnings) ? options.extraWarnings : [];
+      const warnings = [...new Set([
+        ...(computed.statusUsage.warnings ?? []),
+        ...(message ? [message] : []),
+        ...extraWarnings,
+      ])];
+      const statusUsage = {...computed.statusUsage, ...limitFields, warnings};
+      if (task && typeof task.lastLimitOverride === 'object' && task.lastLimitOverride &&
+          typeof task.lastLimitOverride.at === 'string') {
+        statusUsage.limitOverride = {
+          at: task.lastLimitOverride.at,
+          reason: boundedReason(task.lastLimitOverride.reason),
+        };
+      }
+      return {
+        available: true,
+        statusUsage,
+        usageRounds: computed.usageRounds,
+        listUsage: listSummaryOf(statusUsage, computed.statusUsage.warnings ?? []),
+        computed: computed.computed,
+        limits,
+      };
     } catch (error) {
       return unavailableUsageSnapshot({task, reason: boundedError(error), limits});
     }
@@ -87,12 +114,11 @@ export class UsageModule {
 
   fallbackLimits() {
     try {
-      return this.limits({});
+      return effectiveLimits(undefined, this.limitsConfig);
     } catch {
-      return this.configuration ?? {};
+      return this.limitsConfig ?? {};
     }
   }
-
   list(task, taskDirectory) {
     return this.snapshot(task, taskDirectory).listUsage;
   }
@@ -105,10 +131,19 @@ export class UsageModule {
   /** Project the already-computed snapshot; never scan the event log twice. */
   view(task, taskDirectory) {
     const snapshot = this.snapshot(task, taskDirectory);
-    if (snapshot.computed) {
-      return this.operations.usageForView(task, taskDirectory, {result: snapshot});
-    }
-    return unavailableUsageView(task, snapshot.statusUsage);
+    if (!snapshot.computed) return unavailableUsageView(task, snapshot.statusUsage);
+    const payload = this.metrics.usageViewFor(task, snapshot.computed);
+    const {pricing, ...totals} = snapshot.statusUsage;
+    return {...payload, totals};
+  }
+
+  /** List flags the manager would otherwise derive from a limit state. */
+  listFlags(snapshot) {
+    const state = snapshot?.statusUsage?.limitState;
+    return {
+      limitBlocked: state === 'blocked',
+      limitWarning: state === 'warning' || state === 'unavailable',
+    };
   }
 
   /**
@@ -204,8 +239,4 @@ export {
   parseOverride,
   unavailableUsageSnapshot,
   unavailableUsageView,
-  usageForList,
-  usageForStatus,
-  usageForTask,
-  usageForView,
 };

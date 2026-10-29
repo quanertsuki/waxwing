@@ -204,3 +204,18 @@
 - 完整测试：`332/332` 通过，47 个测试文件。
 - 发布树：`270` 个文件通过。
 - 遗留：Worker 的 `read_file`/`write_file` 仍接受任意绝对路径（与 Bash 工具同级，本身不构成额外权限边界）；是否限制在工作区内仍需权儿决定。Adapter 的 `sessionContinuity` 目前只作声明，openai-chat 不持久化跨轮历史。
+
+#### #12 Usage：指标与限额分离
+
+状态：完成。
+
+- 新增 `src/usage/metrics.mjs`：`prototype/usage.mjs` 的定价、增量事件索引、成本投影整体迁入，不再读全局 `config`，定价文件与 Provider 定价目录由调用方传入；`metricsForTask` 只返回指标和 `computed`，不评估限额；`usageViewFor` 投影已算好的快照。`fullPricing` 改为选“认识任务模型”的定价来源，而不是永远取第一份。
+- `src/usage/module.mjs`：限额评估只在 `snapshot` 里，用注入的配置（`limits`、`providersDir`、`pricingFile`）；同时负责把限额消息和非指标警告合进 status 警告、生成 list 摘要、投影 `limitOverride`；新增 `listFlags(snapshot)`，manager 不再自己判断 `limitBlocked`/`limitWarning`。删除 `limitsForTask` 参数和无人使用的指标再导出。
+- `prototype/usage.mjs`：改为旧入口转发，保留 `usageForTask`/`usageForList`/`usageForStatus`/`usageForView` 的旧签名，内部构造 `UsageModule` 并注入全局配置；不再有第二份限额逻辑。
+- `ExecutionPolicy` 移到 `src/tasks/execution-policy.mjs`（轮次开头与报告策略段属于任务与验收），`src/usage/execution-policy.mjs` 只做转发；manager 和 `src/app.mjs` 改指新路径。
+- `prototype/manager.mjs`：UsageModule 构造改为传 `{limits, providersDir, pricingFile}`；删除未使用的 `effectiveLimits` 导入；list 标志走 `usageModule.listFlags`；执行策略警告改为 `extraWarnings` 由模块合并。
+- `src/usage/service.mjs`：只接受 `UsageModule` 或新的指标替身，并标注弃用到 0.3.0。
+- 目标测试：`usage.test.mjs` 新增“同一任务 list/status/usage 视图的成本与限额一致”和“多来源定价选对来源”2 项；`usage-module.test.mjs` 改为新契约（指标替身无 limit 字段，限额由模块计算）并覆盖 view 复用快照、损坏覆盖回退、Service 委托；`rework-module.test.mjs` 的替身同步改为指标形状；旧直出路径的损坏限额用例改为验证回退后指标仍可用。
+- 完整测试：`334/334` 通过，47 个测试文件。
+- 发布树：`272` 个文件通过。
+- 遗留：`prototype/usage.mjs` 的转发入口每次调用新建一个 `UsageModule`，只在兼容期使用；按计划在 0.3.0 随兼容层一起删除。

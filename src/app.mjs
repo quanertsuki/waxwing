@@ -19,7 +19,7 @@ export {RuntimeSupervisor} from './runtime/supervisor.mjs';
 export {UsageService} from './usage/service.mjs';
 export {UsageModule} from './usage/module.mjs';
 export {TaskCommandModule} from './tasks/command.mjs';
-export {ExecutionPolicy} from './usage/execution-policy.mjs';
+export {ExecutionPolicy} from './tasks/execution-policy.mjs';
 export {
   blockReason,
   completeLimits,

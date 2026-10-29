@@ -1,5 +1,5 @@
-// Usage metrics and optional cumulative thresholds. Limits stay disabled
-// unless the task or configuration explicitly opts in.
+// Compatibility facade for 0.1 callers. New callers use `UsageModule`; the
+// module owns both metrics and limit evaluation, so this class only forwards.
 import {UsageModule} from './module.mjs';
 
 export {
@@ -10,17 +10,15 @@ export {
 } from '../../prototype/usage.mjs';
 
 /**
- * Compatibility facade for 0.1 adapters. New callers use `UsageModule`
- * directly; this class keeps the old construction shape working and gives it
- * the same never-throw behaviour.
- *
- * @deprecated Use `UsageModule`; this export remains through 0.1.x.
+ * @deprecated Use `UsageModule`; this export remains until 0.3.0.
  */
 export class UsageService {
-  constructor(operations = {}) {
-    this.module = operations instanceof UsageModule
-      ? operations
-      : new UsageModule({operations});
+  /**
+   * @param usage - a `UsageModule`, or `{metricsForTask, usageViewFor}` for a
+   *   test double. The old snapshot-shaped operations are no longer accepted.
+   */
+  constructor(usage = {}) {
+    this.module = usage instanceof UsageModule ? usage : new UsageModule({metrics: usage.metrics ?? usage});
   }
 
   snapshot(task, taskDirectory, options = {}) {
