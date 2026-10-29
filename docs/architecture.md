@@ -49,6 +49,11 @@ still delegate to battle-tested `prototype/` code. The coordinator remains the
 single owner of a task lifecycle, so adapters and desktop commands never write
 task state directly.
 
+The release safety net discovers its inputs instead of listing them: the test
+runner imports every `prototype/tests/*.test.mjs`, the release check requires
+every `src/**/*.mjs`, and the portable desktop backend copies exactly the
+`prototype/` files `package.json` publishes.
+
 ## System view
 
 ```mermaid

@@ -20,6 +20,8 @@ export const TEST_PROVIDERS = path.join(HERE, 'fixtures', 'providers');
 export const TEST_LOCAL_CONFIG = path.join(HERE, 'fixtures', 'test-config.json');
 /** The live manager data root from config.json; tests must never write here. */
 export const REAL_ROOT = path.resolve(loadConfiguration({here: PROTOTYPE, env: {}}).config.root);
+/** Both server aliases resolve to this port whenever a suite imports this file. */
+export const TEST_PORT = '43199';
 
 function samePath(a, b) {
   const left = path.resolve(a), right = path.resolve(b);
@@ -45,5 +47,9 @@ process.env.DSH_SUBAGENT_ROOT = root;
 process.env.DSH_PROTOTYPE_ROOT = root;
 process.env.DSH_SUBAGENT_PROVIDERS_DIR = TEST_PROVIDERS;
 process.env.DSH_SUBAGENT_LOCAL_CONFIG = TEST_LOCAL_CONFIG;
+// Fixed ports: a suite opened directly through this file must never fall back
+// to the configured live port. The runner sets the same values through here.
+process.env.DSH_SUBAGENT_PORT = TEST_PORT;
+process.env.DSH_PROTOTYPE_PORT = TEST_PORT;
 /** The isolated data root every suite in this process must use. */
 export const TEST_ROOT = root;

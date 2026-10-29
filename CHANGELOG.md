@@ -5,6 +5,15 @@ and uses semantic versioning for public releases.
 
 ## [Unreleased]
 
+### Changed
+
+- The test runner imports every `prototype/tests/*.test.mjs` instead of a
+  hand-maintained list, and test isolation (scratch root, fixtures, fixed ports)
+  is defined once in `isolate.mjs`
+- The release check requires every module under `src/` by discovery; the
+  portable desktop backend copies exactly the `prototype/` files `package.json`
+  publishes
+
 ## [0.2.0] - 2026-10-28
 
 ### Changed
