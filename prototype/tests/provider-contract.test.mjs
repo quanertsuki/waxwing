@@ -131,7 +131,7 @@ test('both adapters produce the same result shape and protocol-valid events', as
 test('capabilities replace provider-type branches', () => {
   assert.deepEqual(capabilitiesFor({name: 'dsh', type: 'dsh-sdk'}), {
     effort: false,
-    sessionContinuity: true,
+    sessionContinuity: 'process',
     budgetPatch: true,
   });
   assert.equal(capabilitiesFor({name: 'chat', type: 'openai-chat', supportsReasoning: true}).effort, true);

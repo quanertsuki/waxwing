@@ -14,6 +14,7 @@ import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
 import {ExecutionPolicy} from '../src/tasks/execution-policy.mjs';
 import {capabilitiesFor, prepareTask, resolveProvider} from '../src/providers/registry.mjs';
+import {conversationFileFor, resetConversation} from '../src/providers/conversation.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {RuntimeSettlement} from '../src/runtime/settlement.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
@@ -711,12 +712,20 @@ export function createManager(options = {}) {
     const saved = commit(outcome.task, [outcome.event]);
     runtime.reportHealth(saved, rec, outcome.health.health, outcome.health.detail);
   }
-  /** Deferred Provider fallback starts only after the failed round released. */
+  /**
+   * Deferred Provider fallback starts only after the failed round released.
+   * The fallback model starts a fresh conversation: the failed attempt on the
+   * other model is dropped rather than continued.
+   */
   function handoffReleased(fallback) {
     if (!fallback) return;
     const failed = repository.peek(fallback.taskId);
     if (!failed) return;
-    void executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort).catch(error => {
+    const start = async () => {
+      resetConversation(conversationFileFor(directory(fallback.taskId)));
+      return executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort);
+    };
+    void start().catch(error => {
       const latest = repository.peek(fallback.taskId);
       if (latest && latest.status !== 'failed') {
         persistFailure(settlement.fallbackFailed({
@@ -777,6 +786,10 @@ export function createManager(options = {}) {
         effort,
         // Only a provider that declares a budget patch gets a per-round file.
         budgetFile: capabilitiesFor(next.provider).budgetPatch ? budgetFileFor(directory(next.id)) : null,
+        // A file-continuity provider reads and extends the task's conversation.
+        conversationFile: capabilitiesFor(next.provider).sessionContinuity === 'file'
+          ? conversationFileFor(directory(next.id))
+          : null,
         timeouts: roundTimeouts(config),
       });
     } catch (error) {

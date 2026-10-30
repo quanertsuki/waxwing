@@ -18,7 +18,7 @@ const BUDGET_PLUGIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '.
 
 export class DshSdkAdapter extends ProviderAdapter {
     static capabilities() {
-        return {effort: false, sessionContinuity: true, budgetPatch: true};
+        return {effort: false, sessionContinuity: 'process', budgetPatch: true};
     }
 
     /**

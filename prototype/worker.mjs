@@ -111,7 +111,6 @@ process.on('message', async message => {
         try {
             const result = await adapter.run({
                 prompt: message.prompt,
-                history: task?.history || [],
                 tools: buildMinimalTools(),
                 maxTokens,
                 // Only a provider that declares effort receives it.
@@ -119,6 +118,8 @@ process.on('message', async message => {
                 signal: controller.signal,
                 task,
                 budgetFile: message.budgetFile,
+                conversationFile: message.conversationFile,
+                roundId: channel.roundId,
                 onToolCall: (name, args) => executeTool(name, args, task?.workspace),
                 onEvent: event => channel.send('event', eventMessage(event)),
                 // The DSH harness starts its session lazily on the first round.
