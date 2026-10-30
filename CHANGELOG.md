@@ -33,8 +33,7 @@ and uses semantic versioning for public releases.
   handle decision. Close and restart recovery now pass through the lifecycle
   table: `fail` from `running`, the new `fail_stop` from `stopping`, and a
   repeated failure only updates `error` and records its event.
-  `RuntimeSupervisor`, `RuntimeLifecycle`, and `RuntimeOutcomeSettlement` remain
-  as deprecated facades until 0.3.0; `close-outcome.mjs` is removed
+  `close-outcome.mjs` is removed
 - The manager, CLI, and MCP now share one operation catalogue: each operation
   declares its fields, bounds, defaults, entry exposure, annotations, and
   cross-field rules, so CLI parsing, help text, MCP tool schemas, and manager
@@ -78,10 +77,8 @@ and uses semantic versioning for public releases.
   only place a request limit is evaluated and now also answers the list flags
   and status warnings the manager used to derive. `prototype/usage.mjs` is a
   forwarding legacy entry point, `ExecutionPolicy` moved to
-  `src/tasks/execution-policy.mjs` (the old path forwards until 0.3.0), and
-  `fullPricing` now selects the pricing source that knows the task model
-  instead of the first source. `UsageService` and the module's unused
-  re-exports are marked deprecated
+  `src/tasks/execution-policy.mjs`, and `fullPricing` now selects the pricing
+  source that knows the task model instead of the first source
 - Research depends on a narrow manager interface instead of task records and
   runtime handles: the manager supplies `shardView`, `closeShard`, and
   `cancelTask`, while `shardTransition` and the new `shardCapturePatch` in
@@ -108,8 +105,10 @@ and uses semantic versioning for public releases.
   `terminateRuntime` implementations; the shared config is never mutated, and
   two managers with different data roots no longer interfere. Path utilities
   move to `src/paths/path-utils.mjs`, and `src/workspace/*` no longer imports
-  `prototype/`. Every forced runtime exit now goes through identity
-  verification, including a live Worker that ignores its close message.
+  `prototype/`. A forced stop kills through the child-process handle the
+  manager spawned (a process tree on Windows, `SIGKILL` elsewhere); a runtime
+  known only from its recorded PID after a restart is still terminated only
+  after identity verification.
   Configuration loading, CLI, MCP, loopback client, provider adapters, the
   provider registry, the DSH budget plugin, and the budget/effort rules move
   to `src/`; the `prototype/` files at those paths forward to them, and the
@@ -121,6 +120,27 @@ and uses semantic versioning for public releases.
   paths in the override resolve against the file that contains them; a settings
   save from any client moves a legacy file to the new location with its relative
   paths made absolute
+
+- The Worker's `write_file` tool only writes inside the task workspace; an
+  absolute path elsewhere is refused with a workspace-relative hint, so a copied
+  path cannot bypass worktree isolation. `read_file` may still read outside the
+  workspace
+- `SECURITY.md` states what a deletion grant protects against and that the
+  operating-system account is the trust boundary for `grant_delete`
+
+### Removed
+
+The next release is 0.3.0: these public exports and modules are removed
+without a deprecation release.
+
+- `RuntimeSupervisor`, `RuntimeLifecycle`, and `RuntimeOutcomeSettlement`
+  (`src/runtime/supervisor.mjs`, `lifecycle.mjs`, `outcome.mjs`); use
+  `Runtime` and the newly exported `RuntimeSettlement`
+- `UsageService` (`src/usage/service.mjs`); use `UsageModule`
+- The `src/usage/execution-policy.mjs` forwarder; import `ExecutionPolicy` from
+  `src/tasks/execution-policy.mjs` or the package root
+- `TaskCommandModule#validateRework` and `TaskCommandModule#rework`; rework
+  decisions belong to `TaskRework`
 
 ### Fixed
 

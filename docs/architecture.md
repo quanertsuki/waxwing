@@ -38,10 +38,7 @@ interface.
 | `src/runtime/protocol.mjs` | Round IDs, every message constructor and validator shared by manager and Worker, the round-scoped message set, heartbeat constants |
 | `src/runtime/module.mjs` | Single-round lifecycle: dispatch, ACK, heartbeat, terminal, release, exit, fallback handoff; owns the release and exit gates; a handle is retained until `forget`, so a failed final save stays retryable |
 | `src/runtime/settlement.mjs` | One projection from every runtime fact (terminal, startup failure, fallback failure, ACK timeout, process error/exit, close, restart identity) to the task status, event, lease conclusion, and handle decision |
-| `src/runtime/lifecycle.mjs` | Deprecated compatibility facade over `RuntimeSettlement`; removal at 0.3.0 |
-| `src/runtime/outcome.mjs` | Deprecated alias of `RuntimeSettlement`; removal at 0.3.0 |
-| `src/runtime/supervisor.mjs` | Deprecated facade over the Runtime release/exit gates; removal at 0.3.0 |
-| `src/runtime/identity.mjs` | Runtime identity verification and the only process-termination path: every forced exit, live or recovered, is verified first |
+| `src/runtime/identity.mjs` | Process termination: an owned handle is killed directly (tree on Windows, `SIGKILL` elsewhere); a PID recovered after a restart is killed only after task ID, owner marker, and command line match |
 | `src/acceptance/service.mjs` | Reports, hashes, deletion manifests, human grants; owns the report+record commit and the policy appendix |
 | `src/research/state.mjs` | Shard-to-batch state machine, cancellation preservation, terminal classification, and `shardCapturePatch`, which decides what a captured shard view means |
 | `src/research/repository.mjs` | Batch storage, atomic `batch.json`, and crash-window orphan reconciliation |
@@ -49,18 +46,16 @@ interface.
 | `src/research/report.mjs` | Aggregate report projection, atomic write, hash, and paging |
 | `src/research/service.mjs` | Research orchestration over a narrow interface (`shardView`, `closeShard`, `cancelTask`): scratch workspaces, serialized refresh, partial results |
 | `src/tasks/execution-policy.mjs` | Round-start policy read, bounded prompt appendix, and report provenance |
-| `src/usage/execution-policy.mjs` | Deprecated forwarding import; removal at 0.3.0 |
 | `src/usage/policy.mjs` | Limit validation, inheritance, threshold matrix, one-round override decision |
 | `src/usage/metrics.mjs` | Usage metrics only: pricing, the incremental event index, and cost projection; no limits and no global configuration |
 | `src/usage/module.mjs` | One usage seam: metrics plus limit inheritance, threshold evaluation, list flags, and the one-round override decision |
-| `src/usage/service.mjs` | Deprecated compatibility adapter; production callers use `UsageModule` |
 | `prototype/usage.mjs` | Legacy usage entry point forwarding to metrics and the module |
 | `src/providers/registry.mjs` | Provider discovery, built-in provider names, adapter selection, declared capabilities, and task preparation |
 | `src/providers/adapters/base.mjs` | Provider adapter interface: one round in, bare DSH-format events out, declarative capabilities |
 | `src/providers/adapters/dsh-sdk.mjs` | DSH SDK adapter: one long-lived harness session, the task runtime patch, and the per-round budget file |
 | `src/providers/adapters/openai-chat.mjs` | OpenAI-compatible adapter: tool loop, streaming, and an injectable HTTP transport |
 | `src/providers/budget-plugin.mjs` | DSH plugin mounted into a task runtime; applies the task's budget file to every conversation request |
-| `src/worker/tools.mjs` | Worker-side bash/read/write tool set and executor |
+| `src/worker/tools.mjs` | Worker-side bash/read/write tool set and executor; `write_file` stays inside the workspace |
 | `src/providers/adapter-cache.mjs` | One adapter per Provider identity inside a Worker process |
 | `prototype/manager.mjs` | Composition root: builds one manager from an explicit context and injectable runtime dependencies |
 | `prototype/server.mjs` | HTTP gateway process: binds the configured port, writes the token, and fronts one manager |
@@ -71,7 +66,7 @@ The manager is assembled, not imported: the launcher resolves one
 `createRuntimeContext`, then passes it to `createManager`, which forwards the
 configuration and directories to the modules it builds. The context is frozen,
 nothing reads configuration at import time, and the manager accepts optional
-`fs`, `clock`, `git`, and `terminateRuntime` implementations. Two managers with
+`fs`, `clock`, `git`, `terminateRuntime`, and `killOwnedRuntime` implementations. Two managers with
 different contexts therefore share no task state and can run in one process.
 Modules such as the repository, acceptance service, and workspace lease manager
 receive those dependencies at construction instead of reaching for globals.
@@ -142,7 +137,6 @@ flowchart LR
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
     Settlement["RuntimeSettlement<br/>terminal/failure/close/recovery"]
     Runtime["Runtime<br/>round IDs + heartbeat + recovery"]
-    Supervisor["RuntimeSupervisor<br/>release + exit gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
     Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
     Research["ResearchBatchService + ResearchState<br/>parallel scratch shards + report"]
@@ -179,7 +173,6 @@ flowchart LR
   TaskCmd --> Tasks
   Tasks <--> Settlement
   Tasks <--> Runtime
-  Runtime --> Supervisor
   Tasks <--> Lease
   Tasks <--> Data
   Acceptance --> Data

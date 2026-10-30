@@ -315,9 +315,20 @@
 
 与基线相比：JavaScript 从 256 涨到 363，测试文件从 34 涨到 49；发布树从 248 涨到 292；Rust 从 11 涨到 19。
 
-## 待权儿决定
+## 验收后的决定与修正（2026-10-29）
 
-1. `grant_delete` 的暴露范围（#9）：目前只从 MCP 目录隐藏，网关对任何持有 token 的进程仍接受。是否需要仅桌面端或 CLI 交互确认才可用？
-2. Worker 文件工具的路径范围（#11）：`read_file`/`write_file` 仍接受任意绝对路径；Worker 同时有 Bash 工具，因此这不构成额外权限边界。是否限制在工作区内？
-3. openai-chat 的 rework 上下文：`task.history` 从未被设置，openai-chat 每次返工从空对话开始。是否另开任务？
-4. 弃用导出的删除版本：`UsageService`、`RuntimeSupervisor`、`taskPageView`、`TaskCommandModule`（若并回）按 0.3.0 删除处理，是否同意？
+验收时重跑了全部门禁，结果与上表一致。另外发现一处回退：#15 让强制退出也先做命令行身份校验。macOS 没有 `/proc`，校验必然得到"无法验证"，强制退出直接报错，卡住的 Worker 停不下来；Linux 从 `SIGKILL` 变成了 `SIGTERM`；Windows 每次同步调用 PowerShell，会阻塞 manager。原因在计划措辞"杀进程只保留一条路径（身份校验后终止）"，执行时照做了。
+
+四项待定事项由权儿按建议确定，与回退修正一起完成：
+
+| 项 | 决定 | 改动 |
+| --- | --- | --- |
+| 强制退出回退 | manager 自己持有句柄的子进程直接用句柄终止；身份校验只用于重启后从 `runtime.json` 找回的 PID | `src/runtime/identity.mjs` 新增 `killOwnedRuntime`（Windows `taskkill /T /F` 异步执行，其他平台 `SIGKILL`）；`createManager` 的强制退出改用它，并接受 `killOwnedRuntime` 注入。目标测试：真实 `Runtime` 下忽略关闭消息的 Worker 被 `SIGKILL` 后进入 `closed`；Windows/POSIX 两个分支各自的调用方式 |
+| `grant_delete` 暴露范围 | 保持现状，写明信任边界 | CLI 已要求交互式终端并手输完整任务 ID，MCP 目录不含该操作；同一系统账户下的进程能读 token，也能直接删目录，属于既定信任边界。`SECURITY.md` 新增"Deletion authorization"一节，并更新终止规则的描述 |
+| Worker 文件工具 | `write_file` 只能写工作区内；`read_file` 可以读工作区外 | `src/worker/tools.mjs` 的 `resolveToolPath` 增加 `allowOutside`，只有读取使用；同时修正了旧实现用字符串前缀判断导致 `<workspace>-sibling` 被当成工作区内的问题。目标测试：读外部文件成功、写外部绝对路径被拒且文件未生成、前缀相同的兄弟目录被拒、写工作区内绝对路径成功 |
+| openai-chat 返工上下文 | 另开任务 | 不在本轮范围，单独开会话处理 |
+| 弃用导出 | 下一版发 0.3.0，一次删除，不再保留弃用期 | 删除 `src/runtime/lifecycle.mjs`、`outcome.mjs`、`supervisor.mjs`、`src/usage/service.mjs`、`src/usage/execution-policy.mjs`；`src/app.mjs` 去掉 `RuntimeLifecycle`、`RuntimeOutcomeSettlement`、`RuntimeSupervisor`、`UsageService`，新增导出 `RuntimeSettlement` 与 `TaskRework` 作为替代；`module.mjs` 的 gate 函数不再导出。`taskPageView` 已成为 manager 唯一的分页拼装入口，不再算弃用，保留 |
+
+`CHANGELOG.md` 的 `[Unreleased]` 新增 `Removed` 一节，写明下一版为 0.3.0；版本号本身留到发布准备时再改。
+
+修正后的门禁：`npm test` 365/365（49 个测试文件；删去 1 项 `UsageService` 测试，新增强制退出、终止分支、写入范围各 1 项）；发布树 287 个文件（删去 5 个弃用模块）；`package:smoke`、桌面 typecheck、`git diff --check` 通过；Rust 未改动，验收时 `cargo fmt --check` 与 `cargo test --locked` 19/19 通过。
