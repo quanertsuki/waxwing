@@ -155,6 +155,19 @@ without a deprecation release.
 - The Worker builds its Provider adapter from the current round's Provider, so
   a fallback reusing the same Worker process no longer calls the failed
   Provider's endpoint; the provider config is copied instead of mutated
+- openai-chat rework rounds now continue the previous conversation instead of
+  starting empty. The adapter keeps one JSON line per round in
+  `runs/<id>/conversation.jsonl` (written atomically, failed rounds kept up to
+  their last complete tool exchange), so the history survives a new Worker
+  process. Requests are fitted to the provider's optional `contextWindow`:
+  whole old rounds are dropped first, then old tool exchanges of the current
+  round, with a system note saying what was left out; tool calls and results
+  stay paired, and a request that still cannot fit fails with
+  `context_overflow` before it is sent. A first-round Provider fallback starts
+  a fresh conversation. `sessionContinuity` is now `false`, `'process'` (DSH),
+  or `'file'` (openai-chat); the manager names the conversation file in the run
+  message only for `'file'`. The never-populated `task.history` read and the
+  adapter's unused Anthropic-history conversion are removed
 
 ## [0.2.0] - 2026-10-28
 

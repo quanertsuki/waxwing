@@ -53,7 +53,8 @@ interface.
 | `src/providers/registry.mjs` | Provider discovery, built-in provider names, adapter selection, declared capabilities, and task preparation |
 | `src/providers/adapters/base.mjs` | Provider adapter interface: one round in, bare DSH-format events out, declarative capabilities |
 | `src/providers/adapters/dsh-sdk.mjs` | DSH SDK adapter: one long-lived harness session, the task runtime patch, and the per-round budget file |
-| `src/providers/adapters/openai-chat.mjs` | OpenAI-compatible adapter: tool loop, streaming, and an injectable HTTP transport |
+| `src/providers/adapters/openai-chat.mjs` | OpenAI-compatible adapter: tool loop, streaming, an injectable HTTP transport, and file-backed rework continuity |
+| `src/providers/conversation.mjs` | Per-task conversation file for `sessionContinuity: 'file'` adapters: JSONL format, tool-pair completion, and the context-window fitting rule |
 | `src/providers/budget-plugin.mjs` | DSH plugin mounted into a task runtime; applies the task's budget file to every conversation request |
 | `src/worker/tools.mjs` | Worker-side bash/read/write tool set and executor; `write_file` stays inside the workspace |
 | `src/providers/adapter-cache.mjs` | One adapter per Provider identity inside a Worker process |
@@ -108,12 +109,25 @@ and JavaScript tests read.
 
 `provider.type` selects exactly one adapter through
 `src/providers/registry.mjs`; no other module branches on the type name. Each
-adapter declares capabilities — reasoning effort, in-process session
-continuity, and whether the task needs a runtime patch and a per-round budget
-file — so the manager and the Worker ask the adapter what a round receives.
-The DSH SDK adapter owns its harness session and the task runtime patch; the
-openai-chat adapter owns its tool loop and accepts an injected HTTP transport,
-so its tests need no loopback server. Both stream bare DSH-format events through
+adapter declares capabilities — reasoning effort, how a rework round sees
+earlier rounds (`sessionContinuity`: `false`, `'process'`, or `'file'`), and
+whether the task needs a runtime patch and a per-round budget file — so the
+manager and the Worker ask the adapter what a round receives. The DSH SDK
+adapter owns its harness session and the task runtime patch; the openai-chat
+adapter owns its tool loop and accepts an injected HTTP transport, so its tests
+need no loopback server.
+
+For `'file'` continuity the manager names `runs/<id>/conversation.jsonl` in the
+run message and the adapter reads it at round start and rewrites it atomically
+at round end, before the Worker sends `result`. The manager decides whether a
+round continues (a first-round Provider fallback removes the file first); the
+adapter decides what is stored, so transcripts never cross IPC or enter
+`task.json`. Each request is fitted to the provider's `contextWindow`: oldest
+whole rounds go first, then the oldest tool exchanges of the current round,
+never its prompt or latest exchange, and a request that still cannot fit fails
+with `context_overflow`. Rework itself still requires the task's live runtime,
+so today the file is read by the same Worker; it is what would let a new Worker
+continue once that gate is relaxed. Both stream bare DSH-format events through
 `onEvent`, and the Worker wraps each one with the round protocol before the
 manager validates it.
 
@@ -321,6 +335,7 @@ Waxwing/
     events.jsonl
     runtime.json
     runtime.log
+    conversation.jsonl
     home/
     tmp/
   reports/<task-id>.md
