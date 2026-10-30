@@ -2,8 +2,9 @@
 //
 // The Worker runs these inside its own process with the task workspace as the
 // working directory. Bash already gives the model a shell, so the file tools
-// deliberately accept an absolute path as well as a workspace-relative one;
-// they are convenience wrappers, not a second permission boundary.
+// are not a permission boundary. They guard against a common mistake instead:
+// read_file may look anywhere, but write_file only writes inside the
+// workspace, so worktree isolation is not bypassed by a copied absolute path.
 import {exec} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,7 +40,7 @@ const TOOLS = [
     },
     {
         name: 'write_file',
-        description: 'Write content to a file (relative to workspace or absolute path)',
+        description: 'Write content to a file inside the task workspace (workspace-relative path, or an absolute path within the workspace)',
         input_schema: {
             type: 'object',
             properties: {
@@ -56,14 +57,25 @@ export function buildMinimalTools() {
     return TOOLS;
 }
 
-/** Resolve a relative tool path inside the workspace; absolute paths pass through. */
-export function resolveToolPath(value, workspace) {
-    if (path.isAbsolute(value)) return value;
-    const fullPath = path.join(workspace, value);
-    // A relative path with `..` may still leave the workspace.
+function insideWorkspace(fullPath, root) {
+    const relative = path.relative(root, fullPath);
+    return relative === ''
+        || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/**
+ * Resolve a tool path against the workspace. A relative path may never climb
+ * out of it. An absolute path is accepted only when `allowOutside` is set:
+ * reads use that to look at source projects, writes never do, so a model that
+ * copies an absolute path from its prompt cannot write past an isolated
+ * worktree into the original checkout.
+ */
+export function resolveToolPath(value, workspace, {allowOutside = false} = {}) {
     const root = path.resolve(workspace);
-    if (!path.resolve(fullPath).startsWith(root)) {
-        throw new Error('path must stay inside the workspace');
+    const fullPath = path.resolve(root, value);
+    if (allowOutside && path.isAbsolute(value)) return fullPath;
+    if (!insideWorkspace(fullPath, root)) {
+        throw new Error(`path must stay inside the workspace ${root}; use a workspace-relative path`);
     }
     return fullPath;
 }
@@ -87,7 +99,7 @@ export async function executeTool(name, args = {}, workspace) {
         }
         if (name === 'read_file') {
             if (!args.path || typeof args.path !== 'string') return {content: 'Error: path is required'};
-            const content = fs.readFileSync(resolveToolPath(args.path, workspace), 'utf8');
+            const content = fs.readFileSync(resolveToolPath(args.path, workspace, {allowOutside: true}), 'utf8');
             return {content: content.length > MAX_READ_CHARS
                 ? content.slice(0, MAX_READ_CHARS) + '\n...[truncated]'
                 : content};

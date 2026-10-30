@@ -50,3 +50,25 @@ test('bash runs in the workspace and reports its own failures as content', async
   const missing = await executeTool('bash', {}, dir);
   assert.match(missing.content, /command is required/);
 });
+
+test('write_file stays inside the workspace while read_file may look outside', async () => {
+  const dir = workspace();
+  const outside = workspace();
+  const source = path.join(outside, 'source.txt');
+  fs.writeFileSync(source, 'from the source project');
+
+  const read = await executeTool('read_file', {path: source}, dir);
+  assert.equal(read.content, 'from the source project');
+
+  const refused = await executeTool('write_file', {path: path.join(outside, 'leak.txt'), content: 'x'}, dir);
+  assert.match(refused.content, /^Error executing write_file: path must stay inside the workspace/);
+  assert.equal(fs.existsSync(path.join(outside, 'leak.txt')), false);
+
+  // A sibling whose name merely starts with the workspace path is still outside.
+  const sibling = `${dir}-sibling`;
+  assert.throws(() => resolveToolPath(path.join(sibling, 'x.txt'), dir), /inside the workspace/);
+
+  const inside = await executeTool('write_file', {path: path.join(dir, 'in.txt'), content: 'ok'}, dir);
+  assert.match(inside.content, /Written 2 bytes/);
+  assert.equal(fs.readFileSync(path.join(dir, 'in.txt'), 'utf8'), 'ok');
+});
