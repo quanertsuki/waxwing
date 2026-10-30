@@ -4,7 +4,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {UsageModule} from '../../src/usage/module.mjs';
-import {UsageService} from '../../src/usage/service.mjs';
 
 const limits = {
   enabled: true,
@@ -178,28 +177,7 @@ test('a damaged task limit override falls back to the configured limits', () => 
   }
 });
 
-test('UsageService delegates to a module and accepts metrics doubles', () => {
-  const module = new UsageModule({
-    configuration: limits,
-    metrics: {
-      metricsForTask: () => metrics(1),
-      usageViewFor: task => ({id: task.id, projected: true}),
-    },
-  });
-  const delegated = new UsageService(module);
-  const legacy = new UsageService({metrics: {
-    metricsForTask: () => metrics(1),
-    usageViewFor: task => ({id: task.id, projected: true}),
-  }});
-  const task = {id: 'task-0123456789ab', usageLimits: limits};
-  for (const facade of [delegated, legacy]) {
-    assert.deepEqual(facade.list(task, 'unused'), module.list(task, 'unused'));
-    assert.deepEqual(facade.status(task, 'unused'), module.status(task, 'unused'));
-    assert.deepEqual(facade.view(task, 'unused'), module.view(task, 'unused'));
-  }
-});
-
-test('UsageService and UsageModule return the same unavailable projections', () => {
+test('UsageModule projects unavailable usage when metrics fail', () => {
   const metricsDouble = {
     metricsForTask() {
       throw new Error('events unavailable');
@@ -209,10 +187,13 @@ test('UsageService and UsageModule return the same unavailable projections', () 
     },
   };
   const module = new UsageModule({metrics: metricsDouble});
-  const service = new UsageService({metrics: metricsDouble});
   const task = {id: 'task-0123456789ab'};
-  assert.deepEqual(service.list(task, 'unused'), module.list(task, 'unused'));
-  assert.deepEqual(service.status(task, 'unused'), module.status(task, 'unused'));
-  assert.deepEqual(service.view(task, 'unused'), module.view(task, 'unused'));
-  assert.equal(service.view(task, 'unused').totals.available, false);
+  assert.deepEqual(module.list(task, 'unused'), {available: false, error: 'events unavailable'});
+  const status = module.status(task, 'unused');
+  assert.equal(status.usage.available, false);
+  assert.equal(status.usage.limitBlocked, false);
+  assert.deepEqual(status.usageRounds, []);
+  const view = module.view(task, 'unused');
+  assert.equal(view.totals.available, false);
+  assert.deepEqual(view.totals, status.usage, 'status and view share one unavailable projection');
 });

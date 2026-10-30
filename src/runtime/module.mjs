@@ -53,32 +53,31 @@ const FORCE_EXIT_TIMEOUT_MS = 5_000;
 
 // Release and exit gates. A terminal message is not permission to dispatch the
 // next round: only an explicit `released` opens the gate, and only the process
-// handle can confirm an exit. `Runtime` uses these directly; the deprecated
-// `RuntimeSupervisor` export delegates to them.
+// handle can confirm an exit. Only `Runtime` uses these.
 
 /** Release every waiter on the gate with one verdict. */
-export function settleRecordRelease(record, value) {
+function settleRecordRelease(record, value) {
   if (!record?.releaseWaiters) return;
   const waiters = record.releaseWaiters.splice(0);
   for (const resolve of waiters) resolve(value);
 }
 
 /** Resolve once the active round releases; an exited record yields false. */
-export function waitForRecordRelease(record) {
+function waitForRecordRelease(record) {
   if (!record || record.phase === 'idle') return Promise.resolve(true);
   if (record.phase === 'exited') return Promise.resolve(false);
   return new Promise(resolve => record.releaseWaiters.push(resolve));
 }
 
 /** True only when the process handle reports an exit code or signal. */
-export function recordHasExited(record) {
+function recordHasExited(record) {
   const value = record?.w;
   return value?.exitCode !== null && value?.exitCode !== undefined
     || value?.signalCode !== null && value?.signalCode !== undefined;
 }
 
 /** Wait for the owned process exit event, including an already-exited handle. */
-export function waitForRecordExit(record, timeoutMs) {
+function waitForRecordExit(record, timeoutMs) {
   return new Promise(resolve => {
     if (recordHasExited(record)) {
       resolve(true);

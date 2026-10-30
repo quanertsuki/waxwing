@@ -1,5 +1,5 @@
-// Public composition root. The 0.1 manager remains a compatibility facade while
-// lifecycle, workspace, runtime, and usage responsibilities move into src/.
+// Public composition root. `createManager` assembles the deepened modules
+// exported below; the prototype/ paths remain only as entry-point forwarders.
 export {createManager} from '../prototype/manager.mjs';
 export {TaskLifecycle} from './tasks/lifecycle.mjs';
 export {TaskTransaction} from './tasks/transaction.mjs';
@@ -13,12 +13,10 @@ export {
 } from './tasks/view.mjs';
 export {WorkspaceLeaseManager} from './workspace/lease-manager.mjs';
 export {Runtime, roundTimeouts} from './runtime/module.mjs';
-export {RuntimeLifecycle} from './runtime/lifecycle.mjs';
-export {RuntimeOutcomeSettlement} from './runtime/outcome.mjs';
-export {RuntimeSupervisor} from './runtime/supervisor.mjs';
-export {UsageService} from './usage/service.mjs';
+export {RuntimeSettlement} from './runtime/settlement.mjs';
 export {UsageModule} from './usage/module.mjs';
 export {TaskCommandModule} from './tasks/command.mjs';
+export {TaskRework} from './tasks/rework.mjs';
 export {ExecutionPolicy} from './tasks/execution-policy.mjs';
 export {
   blockReason,

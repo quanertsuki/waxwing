@@ -18,7 +18,7 @@ import {
   DEFAULT_POLICY_FILE,
   ExecutionPolicy,
   digestText,
-} from '../../src/usage/execution-policy.mjs';
+} from '../../src/tasks/execution-policy.mjs';
 
 const limits = {
   enabled: true,
