@@ -16,6 +16,9 @@ function processExists(pid) {
 
 function readProcess(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  // A dead PID is the common case after a restart, and proving it needs no
+  // command-line inspection (on Windows that costs a PowerShell launch).
+  if (!processExists(pid)) return null;
   try {
     if (process.platform === 'win32') {
       const script = [

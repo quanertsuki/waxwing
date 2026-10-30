@@ -60,6 +60,24 @@ export function inspectGitWorkspace(workspace) {
   };
 }
 
+/**
+ * Identify the Git checkout at a worktree path: its root and the branch HEAD
+ * resolves to. Used to prove that a retained worktree is still the task's own
+ * before a new Worker continues in it.
+ */
+export function worktreeIdentity(cwd) {
+  const root = run(cwd, ['rev-parse', '--show-toplevel']);
+  if (!root.ok) {
+    return {root: null, branch: null, error: root.stderr || root.stdout || 'Git root is unavailable'};
+  }
+  const branch = run(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return {
+    root: canonicalExistingPath(root.stdout),
+    branch: branch.ok ? branch.stdout : null,
+    error: branch.ok ? null : (branch.stderr || 'Git branch is unavailable'),
+  };
+}
+
 export function gitStatus(cwd) {
   const result = run(cwd, ['status', '--short', '--branch', '--untracked-files=all']);
   return result.ok ? result.stdout : result.stderr;

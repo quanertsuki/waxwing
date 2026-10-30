@@ -168,6 +168,16 @@ without a deprecation release.
   or `'file'` (openai-chat); the manager names the conversation file in the run
   message only for `'file'`. The never-populated `task.history` read and the
   adapter's unused Anthropic-history conversion are removed
+- A `'file'`-continuity task can rework after its Worker exited, including
+  after a manager restart, instead of requiring the original process. The
+  manager proves the old process is gone from the retained handle or, without
+  one, from `runtime.json` plus identity verification; an alive or unverifiable
+  PID, an untrusted runtime, a workspace taken by another live task, and a
+  removed or repurposed worktree still refuse with a specific reason. The old
+  handle is forgotten before `openRound` spawns the new Worker, the journal
+  records `runtime_respawned`, and the untrusted verdict is written to
+  `runtime.json` so it survives both the process exit and a restart. DSH
+  (`'process'`) tasks keep their original refusal
 
 ## [0.2.0] - 2026-10-28
 

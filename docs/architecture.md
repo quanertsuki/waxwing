@@ -125,11 +125,14 @@ adapter decides what is stored, so transcripts never cross IPC or enter
 `task.json`. Each request is fitted to the provider's `contextWindow`: oldest
 whole rounds go first, then the oldest tool exchanges of the current round,
 never its prompt or latest exchange, and a request that still cannot fit fails
-with `context_overflow`. Rework itself still requires the task's live runtime,
-so today the file is read by the same Worker; it is what would let a new Worker
-continue once that gate is relaxed. Both stream bare DSH-format events through
-`onEvent`, and the Worker wraps each one with the round protocol before the
-manager validates it.
+with `context_overflow`. A rework whose Worker exited continues in a newly
+spawned Worker for a `'file'` provider, once the manager proves the old process
+is gone (the retained handle, or after a restart `runtime.json` plus identity
+verification), confirms the old runtime was not marked untrusted, and checks
+that the workspace is free and an isolated worktree is still this task's own.
+A `'process'` provider keeps the original refusal. Both stream bare DSH-format
+events through `onEvent`, and the Worker wraps each one with the round protocol
+before the manager validates it.
 
 ## System view
 

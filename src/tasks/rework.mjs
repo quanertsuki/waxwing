@@ -1,14 +1,30 @@
 import {parseOptionalMaxTokens} from './budget.mjs';
 import {parseOptionalEffort} from './effort.mjs';
+import {canonicalPath} from '../paths/path-utils.mjs';
 
 function plainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function pidText(value) {
+  return Number.isSafeInteger(value) && value > 0 ? ` (PID ${value})` : '';
+}
+
+function pathText(value) {
+  return typeof value === 'string' && value ? ` (${value})` : '';
 }
 
 /**
  * Status and closing preconditions for another round. These describe the task
  * lifecycle, not acceptance evidence, so they live beside the rest of the
  * rework decision.
+ *
+ * When the old Worker is gone, the same statuses accept a rework as when it is
+ * live: awaiting_review, failed, and cancelled. A failed task restored after a
+ * manager restart therefore qualifies, because the interrupted round never
+ * wrote the conversation file; the new round continues from the last completed
+ * round. Running and stopping wait for the current process, and closed or
+ * accepted tasks always need a new task.
  */
 export function reworkStatusRefusal(task, {closing = false} = {}) {
   if (task?.status === 'closed') return 'Task is closed; create a new task for follow-up work';
@@ -25,6 +41,15 @@ export function reworkStatusRefusal(task, {closing = false} = {}) {
  * once per rework request and `blockedReason` once per status summary, so the
  * displayed refusal and the action refusal cannot drift. The result carries a
  * record patch; nothing is written until `prepareRun` accepts the round.
+ *
+ * Continuity without a live Worker. A provider that declares
+ * `sessionContinuity: 'file'` may rework after its Worker exited, because the
+ * next Worker reads the task's conversation file. That relaxation needs facts
+ * the manager injects per decision: the adapter capability, whether the old
+ * process is proven gone, whether it was marked untrusted before it exited,
+ * and whether the task's worktree is still its own. A `'process'` provider
+ * (the DSH SDK) keeps the original refusal, and a task whose runtime is still
+ * alive is never reworked here.
  */
 export class TaskRework {
   constructor({
@@ -80,7 +105,13 @@ export class TaskRework {
       return `Maximum ${maxRounds} rounds reached; create a new task for further work`;
     }
     if (!facts.live && (task.rounds?.length ?? 0) > 0) {
-      return `Original runtime is gone; this DSH cannot resume sessionId ${task.sessionId} in a new runtime; create a new task for follow-up work`;
+      // A file-backed conversation can continue in a freshly spawned Worker;
+      // a process-held session cannot. Either way, the old runtime has to be
+      // provably gone before this gate passes.
+      const refusal = facts.sessionContinuity === 'file'
+        ? this.#respawnRefusal(facts)
+        : `Original runtime is gone; this DSH cannot resume sessionId ${task.sessionId} in a new runtime; create a new task for follow-up work`;
+      if (refusal) return refusal;
     }
     const conflict = this.workspaceConflict(task.workspace, task.id);
     if (conflict) {
@@ -152,7 +183,62 @@ export class TaskRework {
       record,
       event: usageResult.event ? {...usageResult.event} : null,
       usage: usageResult.usage,
+      // The manager must drop a confirmed-exited handle before openRound, or
+      // the Runtime would reuse the dead Worker instead of spawning one.
+      respawn: !currentFacts.live && (task.rounds?.length ?? 0) > 0 &&
+        currentFacts.sessionContinuity === 'file',
     };
+  }
+
+  /**
+   * Refusals specific to continuing a file-backed conversation in a new
+   * Worker. `facts.continuation` is the manager's evidence about the old
+   * runtime; anything it cannot prove keeps the task resumable only as a new
+   * task. The order is: an untrusted verdict, an unverified residual process,
+   * an alive process, an unconfirmed exit, and finally the worktree.
+   */
+  #respawnRefusal(facts) {
+    const continuation = facts.continuation ?? {};
+    if (continuation.unreworkableReason) return continuation.unreworkableReason;
+    if (continuation.manualActionRequired) {
+      return `The old runtime is unverified${pidText(continuation.pid)}; resolve that process manually before reworking this task`;
+    }
+    const identity = continuation.identity;
+    if (identity?.alive === true) {
+      const known = Number.isSafeInteger(identity.actual?.pid) ? identity.actual.pid
+        : Number.isSafeInteger(continuation.pid) ? continuation.pid : null;
+      if (identity.verified === true) {
+        return `The original runtime is still running${pidText(known)}; close it before reworking this task`;
+      }
+      return `Cannot confirm the original runtime exited: ${known ? `PID ${known} is running` : 'the recorded PID is running'} but its identity could not be verified; create a new task or resolve that process manually`;
+    }
+    if (continuation.exitConfirmed !== true) {
+      return 'Cannot confirm the original runtime exited (no verifiable runtime record); create a new task for follow-up work';
+    }
+    return this.#leaseRefusal(continuation.lease);
+  }
+
+  /**
+   * An isolated task's worktree has to still be this task's own checkout. A
+   * dirty worktree is expected (it holds the task's uncommitted work), but a
+   * removed path, a different Git root, or another branch means a new Worker
+   * would write somewhere the task no longer owns.
+   */
+  #leaseRefusal(lease) {
+    if (!lease || lease.mode !== 'worktree') return null;
+    if (lease.missing || lease.status === 'removed') {
+      return `The task's worktree is gone${pathText(lease.expectedRoot)}; create a new task for follow-up work`;
+    }
+    if (lease.rootError || !lease.root || !lease.branch) {
+      return `The task's worktree could not be verified as this task's checkout${pathText(lease.expectedRoot)}; create a new task for follow-up work`;
+    }
+    if (lease.expectedRoot && canonicalPath(lease.root) !== canonicalPath(lease.expectedRoot)) {
+      return `The task's worktree is no longer this task's checkout${pathText(lease.root)}; create a new task for follow-up work`;
+    }
+    if (lease.expectedBranch && lease.branch !== lease.expectedBranch) {
+      return `The task's worktree is on branch ${lease.branch} instead of ${lease.expectedBranch}; create a new task for follow-up work`;
+    }
+    return null;
   }
 
   /**
