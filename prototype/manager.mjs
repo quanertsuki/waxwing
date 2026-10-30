@@ -28,7 +28,7 @@ import {
   workspaceLabel,
 } from '../src/tasks/view.mjs';
 import {DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, pageOf, safeOffset, safePageLimit} from '../src/view/page.mjs';
-import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
+import {killOwnedRuntime, terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
 import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
 import {TaskCommandModule} from '../src/tasks/command.mjs';
@@ -111,7 +111,10 @@ export function createManager(options = {}) {
   const fileSystem = options.fs ?? fs;
   const clock = options.clock ?? {now: () => new Date()};
   const now = () => clock.now().toISOString();
+  // Two kill entry points with different evidence: a PID recovered from disk
+  // must prove its identity first; a handle this manager spawned already does.
   const terminateRuntime = options.terminateRuntime ?? (record => terminateVerifiedRuntime(record));
+  const killOwned = options.killOwnedRuntime ?? (handle => killOwnedRuntime(handle));
   ensureDataDirs(context);
   // UsageModule keeps the limit object it was constructed with, so make sure a
   // configuration without limits still yields one stable object.
@@ -676,18 +679,9 @@ export function createManager(options = {}) {
     gracefulExitTimeoutMs: DEFAULT_EXIT_TIMEOUT_MS,
     forceExitTimeoutMs: FORCE_EXIT_TIMEOUT_MS,
     untrusted: (id, detail) => markUntrusted(id, detail),
-    // One kill path: every forced exit goes through identity verification, so
-    // a recycled PID or a foreign process is never terminated.
-    terminate: async ({taskId, rec}) => {
-      const verdict = terminateRuntime({
-        taskId,
-        pid: rec.w.pid,
-        ownerMarker: rec.ownerMarker,
-      });
-      if (verdict?.terminated === false && verdict.alive !== false) {
-        throw new Error(`Could not terminate task ${taskId}: ${verdict.reason ?? 'runtime identity could not be verified'}`);
-      }
-    },
+    // A forced exit always targets a handle this manager spawned, so it kills
+    // through that handle; exit is still confirmed by the Runtime afterwards.
+    terminate: async ({rec}) => killOwned(rec.w),
     settlement,
   });
   /** Persist a terminal result or error, applying first-round Provider fallback. */

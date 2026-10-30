@@ -9,6 +9,7 @@ import {TaskTransaction} from '../../src/tasks/transaction.mjs';
 import {transition as applyTransition} from '../../src/tasks/lifecycle.mjs';
 import {Runtime} from '../../src/runtime/module.mjs';
 import {AcceptanceService} from '../../src/acceptance/service.mjs';
+import {killOwnedRuntime} from '../../src/runtime/identity.mjs';
 
 function temporaryRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-transaction-'));
@@ -334,6 +335,48 @@ test('a real runtime retains an exited handle so a failed close save can retry',
     assert.equal(result.task.status, 'closed');
     assert.equal(runtime.has(task.id), false);
     assert.deepEqual(runtime.ids(), []);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('a worker that ignores close is force-killed through its owned handle', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, writeJson);
+    const task = {id: 'task-0123456789ac', status: 'awaiting_review', rounds: [{number: 1}]};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const handle = fakeChild({exitOnClose: false});
+    const signals = [];
+    handle.kill = signal => {
+      signals.push(signal);
+      setImmediate(() => {
+        handle.exitCode = null;
+        handle.signalCode = signal;
+        handle.emit('exit', null);
+      });
+    };
+    const save = value => repository.save(value);
+    const runtime = realRuntime({repository, handle, save});
+    runtime.adopt(task, handle, 'owner-marker');
+    const acceptance = new AcceptanceService({
+      reportsDir: path.join(root, 'reports'),
+      grantsDir: path.join(root, 'runtime'),
+    });
+    // POSIX branch on every OS: no command-line inspection is involved, which
+    // is what keeps forced exit working where /proc does not exist.
+    const transaction = new TaskTransaction({
+      runtime, repository, save, event: () => {}, acceptance,
+      gracefulExitTimeoutMs: 20,
+      forceExitTimeoutMs: 1_000,
+      terminate: ({rec}) => killOwnedRuntime(rec.w, {platform: 'darwin'}),
+    });
+
+    const result = await transaction.stop(task.id, {closed: true});
+    assert.deepEqual(signals, ['SIGKILL']);
+    assert.equal(result.task.status, 'closed');
+    assert.equal(runtime.has(task.id), false);
   } finally {
     fs.rmSync(root, {recursive: true, force: true});
   }

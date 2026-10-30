@@ -1,5 +1,6 @@
 import fs from 'node:fs';
-import {execFileSync} from 'node:child_process';
+import {once} from 'node:events';
+import {execFileSync, spawn} from 'node:child_process';
 
 function processExists(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -79,6 +80,32 @@ export function verifyOwnedRuntime(record, options = {}) {
   };
 }
 
+/**
+ * Force-exit a Worker through the handle this manager spawned.
+ *
+ * Identity verification exists for PIDs found on disk after a restart, where
+ * the number may have been recycled. An owned handle cannot be recycled: until
+ * Node reaps the child (POSIX) or closes its process handle (Windows), the PID
+ * still names our Worker. So this path kills directly, which also keeps it
+ * working where command lines cannot be inspected (macOS has no /proc).
+ * Windows kills the whole tree because the Worker may have started shells.
+ */
+export async function killOwnedRuntime(handle, {platform = process.platform, spawnProcess = spawn} = {}) {
+  if (!handle || !Number.isSafeInteger(handle.pid) || handle.pid <= 0) {
+    throw new Error('owned runtime handle has no PID');
+  }
+  if (platform === 'win32') {
+    const kill = spawnProcess('taskkill', ['/PID', String(handle.pid), '/T', '/F'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    await once(kill, 'exit');
+    return;
+  }
+  handle.kill('SIGKILL');
+}
+
+/** Terminate a runtime known only by its recorded PID, after proving it is ours. */
 export function terminateVerifiedRuntime(record, options = {}) {
   const initial = options.identity ?? verifyOwnedRuntime(record, options);
   if (!initial || initial.verified !== true) {

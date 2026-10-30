@@ -1,8 +1,10 @@
 // Runtime recovery must never terminate a process based only on a reused PID.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {EventEmitter} from 'node:events';
 import {randomUUID} from 'node:crypto';
 import {
+  killOwnedRuntime,
   terminateVerifiedRuntime,
   verifyOwnedRuntime,
 } from '../../src/runtime/identity.mjs';
@@ -71,4 +73,24 @@ test('a matching task and owner marker is verified before termination', () => {
   assert.equal(result.verified, true);
   assert.equal(result.terminated, true);
   assert.equal(terminated, true);
+});
+
+test('an owned handle is killed directly, as a tree on Windows', async () => {
+  const spawned = [];
+  const spawnProcess = (command, args) => {
+    spawned.push([command, ...args]);
+    const child = new EventEmitter();
+    setImmediate(() => child.emit('exit', 0));
+    return child;
+  };
+  await killOwnedRuntime({pid: 4242, kill: () => assert.fail('Windows must not signal the handle')},
+    {platform: 'win32', spawnProcess});
+  assert.deepEqual(spawned, [['taskkill', '/PID', '4242', '/T', '/F']]);
+
+  const signals = [];
+  await killOwnedRuntime({pid: 4242, kill: signal => signals.push(signal)},
+    {platform: 'linux', spawnProcess: () => assert.fail('POSIX must not spawn a killer')});
+  assert.deepEqual(signals, ['SIGKILL']);
+
+  await assert.rejects(() => killOwnedRuntime({pid: null}), /no PID/);
 });
