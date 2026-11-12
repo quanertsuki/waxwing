@@ -1,13 +1,57 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {EventEmitter} from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {TaskRepository} from '../../src/tasks/repository.mjs';
 import {TaskTransaction} from '../../src/tasks/transaction.mjs';
+import {transition as applyTransition} from '../../src/tasks/lifecycle.mjs';
+import {Runtime} from '../../src/runtime/module.mjs';
+import {AcceptanceService} from '../../src/acceptance/service.mjs';
+import {killOwnedRuntime} from '../../src/runtime/identity.mjs';
 
 function temporaryRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-transaction-'));
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), {recursive: true});
+  fs.writeFileSync(file, JSON.stringify(value));
+}
+
+/** A child-process stand-in that exits when it receives the close message. */
+function fakeChild({exitOnClose = true} = {}) {
+  const handle = new EventEmitter();
+  handle.stdout = new EventEmitter();
+  handle.stderr = new EventEmitter();
+  handle.pid = 4242;
+  handle.connected = true;
+  handle.exitCode = null;
+  handle.signalCode = null;
+  handle.sent = [];
+  handle.send = message => {
+    handle.sent.push(message);
+    if (!exitOnClose || message.kind !== 'close') return;
+    setImmediate(() => {
+      handle.connected = false;
+      handle.exitCode = 0;
+      handle.emit('exit', 0);
+    });
+  };
+  return handle;
+}
+
+/** Real Runtime and lifecycle over one retained fake handle. */
+function realRuntime({repository, handle, save}) {
+  return new Runtime({
+    spawn: () => handle,
+    latest: id => repository.peek(id) ?? null,
+    event: () => {},
+    save: ({task}) => save(task),
+    transition: ({task, action}) => applyTransition(task, action),
+    persist: () => {},
+  });
 }
 
 function repositoryAt(root, atomicJson) {
@@ -106,8 +150,11 @@ test('a failed atomic write never publishes a task into the repository index', (
     assert.deepEqual(repository.ids(), []);
 
     fail = false;
-    repository.save(task);
-    assert.equal(repository.get(task.id), task);
+    const saved = repository.save(task);
+    assert.notEqual(saved, task, 'commit stores an immutable snapshot');
+    assert.equal(saved.eventSequence, 0);
+    assert.equal(Object.isFrozen(saved), true);
+    assert.equal(repository.get(task.id), saved);
     assert.deepEqual(repository.ids(), [task.id]);
   } finally {
     fs.rmSync(root, {recursive: true, force: true});
@@ -130,12 +177,52 @@ test('stop without a runtime handle closes directly and records the final event'
       repository,
       save: value => repository.save(value),
       event: (value, payload) => events.push({status: value.status, ...payload}),
-      acceptance: {report: () => ({hash: 'report-hash'})},
+      acceptance: {
+        writeReportAndSave: (value, {save}) => ({task: save({...value, reportHash: 'report-hash'})}),
+      },
     });
     const result = await transaction.stop(task.id, {closed: true});
     assert.equal(result.task.status, 'closed');
     assert.equal(result.task.reportHash, 'report-hash');
     assert.deepEqual(events.map(value => value.kind), ['closed']);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('a close cleanup failure fails the stopping task and the next close can finish it', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, (file, value) => {
+      fs.mkdirSync(path.dirname(file), {recursive: true});
+      fs.writeFileSync(file, JSON.stringify(value));
+    });
+    const task = {id: 'task-0123456789ab', status: 'awaiting_review', rounds: []};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const runtime = memoryRuntime(new Map([[task.id, {w: {pid: 7}}]]));
+    runtime.closeError = () => 'close request failed: pipe broke';
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save: value => repository.save(value),
+      event: () => {},
+      acceptance: {
+        writeReportAndSave: (value, {save}) => ({task: save({...value, reportHash: 'report-hash'})}),
+      },
+    });
+
+    await assert.rejects(
+      transaction.stop(task.id, {closed: true}),
+      /runtime cleanup failed: close request failed/,
+    );
+    const failed = repository.get(task.id);
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error, /runtime cleanup failed/);
+
+    const retried = await transaction.stop(task.id, {closed: true});
+    assert.equal(retried.task.status, 'closed');
+    assert.equal(retried.task.reportHash, 'report-hash');
   } finally {
     fs.rmSync(root, {recursive: true, force: true});
   }
@@ -211,6 +298,145 @@ test('a failed terminal save after exit keeps the handle and allows another stop
     const result = await transaction.stop(task.id);
     assert.equal(result.task.status, 'cancelled');
     assert.equal(result.task.reportHash, undefined);
+    assert.equal(runtime.has(task.id), false);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('a real runtime retains an exited handle so a failed close save can retry', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, writeJson);
+    const task = {id: 'task-0123456789ab', status: 'awaiting_review', rounds: [{number: 1}]};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const handle = fakeChild();
+    let failClosed = true;
+    const save = value => {
+      if (failClosed && value.status === 'closed') throw new Error('disk full');
+      return repository.save(value);
+    };
+    const runtime = realRuntime({repository, handle, save});
+    runtime.adopt(task, handle, 'owner-marker');
+    const acceptance = new AcceptanceService({
+      reportsDir: path.join(root, 'reports'),
+      grantsDir: path.join(root, 'runtime'),
+    });
+    const transaction = new TaskTransaction({runtime, repository, save, event: () => {}, acceptance});
+
+    await assert.rejects(() => transaction.stop(task.id, {closed: true}), /disk full/);
+    assert.equal(repository.peek(task.id).status, 'stopping', 'the final state was never made durable');
+    assert.equal(runtime.has(task.id), true, 'the handle outlives the exit for the retry');
+    assert.equal(runtime.isLive(task.id), false, 'the process itself is gone');
+
+    failClosed = false;
+    const result = await transaction.stop(task.id, {closed: true});
+    assert.equal(result.task.status, 'closed');
+    assert.equal(runtime.has(task.id), false);
+    assert.deepEqual(runtime.ids(), []);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('a worker that ignores close is force-killed through its owned handle', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, writeJson);
+    const task = {id: 'task-0123456789ac', status: 'awaiting_review', rounds: [{number: 1}]};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const handle = fakeChild({exitOnClose: false});
+    const signals = [];
+    handle.kill = signal => {
+      signals.push(signal);
+      setImmediate(() => {
+        handle.exitCode = null;
+        handle.signalCode = signal;
+        handle.emit('exit', null);
+      });
+    };
+    const save = value => repository.save(value);
+    const runtime = realRuntime({repository, handle, save});
+    runtime.adopt(task, handle, 'owner-marker');
+    const acceptance = new AcceptanceService({
+      reportsDir: path.join(root, 'reports'),
+      grantsDir: path.join(root, 'runtime'),
+    });
+    // POSIX branch on every OS: no command-line inspection is involved, which
+    // is what keeps forced exit working where /proc does not exist.
+    const transaction = new TaskTransaction({
+      runtime, repository, save, event: () => {}, acceptance,
+      gracefulExitTimeoutMs: 20,
+      forceExitTimeoutMs: 1_000,
+      terminate: ({rec}) => killOwnedRuntime(rec.w, {platform: 'darwin'}),
+    });
+
+    const result = await transaction.stop(task.id, {closed: true});
+    assert.deepEqual(signals, ['SIGKILL']);
+    assert.equal(result.task.status, 'closed');
+    assert.equal(runtime.has(task.id), false);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('a real runtime forgets the handle after a normal confirmed close', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, writeJson);
+    const task = {id: 'task-0123456789ab', status: 'awaiting_review', rounds: [{number: 1}]};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const handle = fakeChild();
+    const save = value => repository.save(value);
+    const runtime = realRuntime({repository, handle, save});
+    runtime.adopt(task, handle, 'owner-marker');
+    const transaction = new TaskTransaction({runtime, repository, save, event: () => {}});
+
+    const result = await transaction.stop(task.id, {closed: false});
+    assert.equal(result.task.status, 'cancelled');
+    assert.equal(runtime.has(task.id), false);
+    assert.deepEqual(runtime.ids(), []);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
+
+test('an unexpected exit fails the task and the next close forgets the handle', async () => {
+  const root = temporaryRoot();
+  try {
+    const repository = repositoryAt(root, writeJson);
+    const task = {id: 'task-0123456789ab', status: 'running', rounds: [{number: 1}]};
+    repository.remember(task);
+    fs.mkdirSync(path.join(root, 'runs', task.id), {recursive: true});
+    const handle = fakeChild({exitOnClose: false});
+    const save = value => repository.save(value);
+    const runtime = realRuntime({repository, handle, save});
+    runtime.adopt(task, handle, 'owner-marker');
+
+    handle.exitCode = 1;
+    handle.emit('exit', 1);
+    const failed = repository.peek(task.id);
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error, /worker exited \(1\)/);
+    assert.equal(runtime.has(task.id), true, 'the handle is retained until someone closes the task');
+    assert.equal(runtime.isLive(task.id), false);
+    assert.deepEqual(runtime.liveIds(), []);
+
+    const transaction = new TaskTransaction({
+      runtime,
+      repository,
+      save,
+      event: () => {},
+      acceptance: new AcceptanceService({
+        reportsDir: path.join(root, 'reports'),
+        grantsDir: path.join(root, 'runtime'),
+      }),
+    });
+    const result = await transaction.stop(task.id, {closed: true});
+    assert.equal(result.task.status, 'closed');
     assert.equal(runtime.has(task.id), false);
   } finally {
     fs.rmSync(root, {recursive: true, force: true});
@@ -368,8 +594,8 @@ test('prepareRun refuses a running task and an un-released previous runtime with
     );
     assert.equal(saved, 0);
 
-    running.status = 'awaiting_review';
-    runtime.records.set(running.id, {phase: 'finished', w: {}});
+    const review = repository.remember({...running, status: 'awaiting_review'});
+    runtime.records.set(review.id, {phase: 'finished', w: {}});
     runtime.waitForRelease = async () => false;
     await assert.rejects(
       () => transaction.prepareRun(running.id, {prompt: 'next', maxTokens: 1024}),

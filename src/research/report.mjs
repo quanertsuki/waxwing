@@ -1,43 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {createHash} from 'node:crypto';
-
-const DEFAULT_PAGE_LIMIT = 2000;
-const MAX_PAGE_LIMIT = 4000;
-let tempCounter = 0;
-
-function digest(value) {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-function safeOffset(value) {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error('offset must be a non-negative safe integer');
-  }
-  return value;
-}
-
-function safeLimit(value) {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) ||
-      value < 1 || value > MAX_PAGE_LIMIT) {
-    throw new Error(`limit must be a safe integer between 1 and ${MAX_PAGE_LIMIT}`);
-  }
-  return value;
-}
-
-export function pageOf(value, offset, limit) {
-  const total = value.length;
-  if (offset > total) throw new Error(`offset ${offset} exceeds text length ${total}`);
-  let end = Math.min(total, offset + limit);
-  if (end < total && end > offset && /[\uD800-\uDBFF]/.test(value[end - 1])) end -= 1;
-  return {
-    text: value.slice(offset, end),
-    totalChars: total,
-    offset,
-    limit,
-    nextOffset: end < total ? end : null,
-  };
-}
+import {atomicWriteText, sha256} from '../storage/durable-file.mjs';
+import {DEFAULT_PAGE_LIMIT, pageOf, safeOffset, safePageLimit} from '../view/page.mjs';
 
 /**
  * Build and atomically write the aggregate research report. Reads are
@@ -45,7 +9,7 @@ export function pageOf(value, offset, limit) {
  * making the whole collection fail.
  */
 export class ResearchReport {
-  constructor({reportsDir, repository, files = fs, digestText = digest}) {
+  constructor({reportsDir, repository, files = fs, digestText = sha256}) {
     if (!repository) throw new Error('repository dependency is required');
     this.reportsDir = path.resolve(reportsDir);
     this.repository = repository;
@@ -115,17 +79,7 @@ export class ResearchReport {
   write(batch, content) {
     const file = this.file(batch.id);
     this.files.mkdirSync(this.reportsDir, {recursive: true});
-    const temp = `${file}.${process.pid}.${++tempCounter}.tmp`;
-    try {
-      this.files.writeFileSync(temp, content);
-      this.files.renameSync(temp, file);
-    } catch (error) {
-      try {
-        this.files.rmSync(temp, {force: true});
-      } catch {}
-      throw error;
-    }
-    return file;
+    return atomicWriteText(file, content, {files: this.files});
   }
 
   collect(batch, options = {}) {
@@ -133,7 +87,7 @@ export class ResearchReport {
     const hash = this.digestText(content);
     const file = this.write(batch, content);
     const offset = options.offset === undefined ? 0 : safeOffset(options.offset);
-    const limit = options.limit === undefined ? DEFAULT_PAGE_LIMIT : safeLimit(options.limit);
+    const limit = options.limit === undefined ? DEFAULT_PAGE_LIMIT : safePageLimit(options.limit);
     return {file, reportHash: hash, page: pageOf(content, offset, limit)};
   }
 }

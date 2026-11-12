@@ -74,11 +74,14 @@ workspace/
   deepseek-harness/
 ```
 
-Create a local, ignored override when your paths differ:
-
-```powershell
-Copy-Item prototype/config.local.example.json prototype/config.local.json
-```
+Create a local override when your paths differ. It belongs in the per-user data
+directory (`%LOCALAPPDATA%\Waxwing\config.local.json` on Windows,
+`~/Library/Application Support/Waxwing/config.local.json` on macOS, and
+`$XDG_DATA_HOME/waxwing/config.local.json` on Linux), or wherever
+`WAXWING_LOCAL_CONFIG` points. Copy `prototype/config.local.example.json`
+there rather than into the checkout: an update replaces the installation
+directory. An older `prototype/config.local.json` is still read when the new
+file does not exist.
 
 For an OpenAI-compatible endpoint, copy
 `examples/providers/openai-compatible.json` into your provider directory
@@ -266,8 +269,17 @@ authorization; project files and the external report are preserved.
 Configuration layering:
 
 1. `prototype/config.json` or `WAXWING_CONFIG`
-2. `prototype/config.local.json` or `WAXWING_LOCAL_CONFIG`
+2. The local override: `WAXWING_LOCAL_CONFIG`, then
+   `<platform data directory>/config.local.json`, then the legacy
+   `prototype/config.local.json` when the new file does not exist
 3. environment variables
+
+A relative path in the local override resolves against the directory that
+contains that file; a relative path in `config.json` resolves against the
+`config.json` directory. The desktop settings page writes to the new location,
+converting any relative paths inherited from a legacy file to absolute paths
+so they keep pointing at the same directories. The legacy file is left in
+place.
 
 Common environment variables:
 

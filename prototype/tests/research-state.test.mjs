@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ACTIVE_TASK,
   aggregateBatchStatus,
   countByShardStatus,
   isActiveBatch,
   isTerminalBatch,
+  shardCapturePatch,
   shardTransition,
+  TERMINAL_TASK,
 } from '../../src/research/state.mjs';
+import {ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES} from '../../src/tasks/lifecycle.mjs';
 
 const shard = status => ({status, taskId: 'task-0123456789ab'});
 
@@ -121,4 +125,59 @@ test('a closed task is terminal without a second capture or finalization', () =>
     finalize: false,
     terminal: true,
   });
+});
+
+const CAPTURE_CASES = [
+  {
+    name: 'a review-ready finish is completed evidence',
+    view: {status: 'awaiting_review', finishReason: 'stop'},
+    expect: {status: 'completed', error: null},
+  },
+  {
+    name: 'a closed task keeps the evidence it captured',
+    view: {status: 'closed', finishReason: null},
+    expect: {status: 'completed', error: null},
+  },
+  {
+    name: 'an error finish reason fails even when the task did not',
+    view: {status: 'awaiting_review', finishReason: 'error'},
+    expect: {status: 'failed', error: 'Research shard failed without an error message'},
+  },
+  {
+    name: 'a failed task keeps its own error text',
+    view: {status: 'failed', error: 'provider down'},
+    expect: {status: 'failed', error: 'provider down'},
+  },
+  {
+    name: 'a cancelled task keeps its own error text',
+    view: {status: 'cancelled', error: 'stopped by operator'},
+    expect: {status: 'cancelled', error: 'stopped by operator'},
+  },
+  {
+    name: 'a cancelled task without an error gets a stable default',
+    view: {status: 'cancelled'},
+    expect: {status: 'cancelled', error: 'Research shard cancelled'},
+  },
+  {
+    name: 'a missing view still yields a completed patch',
+    view: null,
+    expect: {status: 'completed', error: null},
+  },
+];
+
+for (const row of CAPTURE_CASES) {
+  test(`captured evidence: ${row.name}`, () => {
+    assert.deepEqual(shardCapturePatch(row.view), row.expect);
+  });
+}
+
+test('research and the manager classify task statuses with the same sets', () => {
+  assert.equal(ACTIVE_TASK, ACTIVE_TASK_STATUSES);
+  assert.equal(TERMINAL_TASK, TERMINAL_TASK_STATUSES);
+  assert.deepEqual([...ACTIVE_TASK_STATUSES].sort(), ['created', 'running', 'stopping']);
+  assert.deepEqual([...TERMINAL_TASK_STATUSES].sort(),
+    ['accepted', 'awaiting_review', 'cancelled', 'closed', 'failed']);
+  for (const status of ACTIVE_TASK_STATUSES) {
+    assert.equal(TERMINAL_TASK_STATUSES.has(status), false, `${status} must not be terminal`);
+  }
 });

@@ -118,60 +118,8 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
-
-interface TaskDetail {
-  id: string;
-  status: string;
-  statusLabel?: string;
-  roundCount: number;
-  roundId?: string;
-  provider?: string;
-  model?: string;
-  workspace: string;
-  sourceWorkspace?: string;
-  workspaceMode?: string;
-  workspaceLabel?: string;
-  worktreeStatus?: string;
-  branch?: string;
-  baseCommit?: string;
-  live: boolean;
-  accepted: boolean;
-  canRework?: boolean;
-  manualActionRequired?: boolean;
-  runtimeHealth?: string;
-  runtime?: { pid?: number };
-  reworkBlockedReason?: string;
-  runtimePhase?: string | null;
-  sessionId?: string;
-  eventCount?: number;
-  runtimeReady?: boolean;
-  lastRound?: {
-    number: number;
-    roundId?: string;
-    startedAt?: string | null;
-    finishedAt?: string | null;
-    maxTokens?: number | null;
-    effort?: string;
-  };
-  usage?: {
-    available?: boolean;
-    requests?: number;
-    inputTokens?: number;
-    outputTokens?: number;
-    estimatedCostCny?: number | null;
-    costComplete?: boolean;
-    warnings?: string[];
-  };
-}
-
-interface Page {
-  text: string;
-  offset: number;
-  totalChars: number;
-  nextOffset: number | null;
-  complete: boolean;
-}
+import { api } from '../api';
+import type { ReworkInput, TaskDetail, TaskViewPage } from '../api';
 
 const props = defineProps<{ taskId: string }>();
 const emit = defineEmits<{ close: []; refresh: [] }>();
@@ -183,8 +131,8 @@ const working = ref(false);
 const evidence = ref('');
 const rework = reactive({ prompt: '', maxTokens: '' });
 const activeTab = ref('result');
-const page = reactive<Page>({ text: '', offset: 0, totalChars: 0, nextOffset: null, complete: true });
 const pageLimit = 4000;
+const page = reactive<TaskViewPage>({ text: '', offset: 0, limit: pageLimit, totalChars: 0, nextOffset: null, complete: true });
 let pollTimer: number | undefined;
 
 const tabs = [
@@ -198,7 +146,7 @@ const tabs = [
 async function loadDetail(initial = false) {
   if (initial) loading.value = true;
   try {
-    detail.value = await invoke<TaskDetail>('get_task_detail', { id: props.taskId });
+    detail.value = await api.taskDetail(props.taskId);
     error.value = '';
   } catch (value) {
     error.value = String(value);
@@ -210,12 +158,7 @@ async function loadDetail(initial = false) {
 async function loadPage(view = activeTab.value, offset = 0) {
   pageLoading.value = true;
   try {
-    const result = await invoke<Page>('get_task_view', {
-      id: props.taskId,
-      view,
-      offset,
-      limit: pageLimit,
-    });
+    const result = await api.taskView(props.taskId, view, offset, pageLimit);
     Object.assign(page, result);
   } catch (value) {
     error.value = String(value);
@@ -246,13 +189,13 @@ async function refreshAll() {
 async function submitRework() {
   working.value = true;
   try {
-    const args: Record<string, unknown> = { id: props.taskId, prompt: rework.prompt };
+    const args: ReworkInput = { id: props.taskId, prompt: rework.prompt };
     if (rework.maxTokens.trim()) {
       const parsed = Number(rework.maxTokens);
       if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error('输出预算必须是正整数');
       args.maxTokens = parsed;
     }
-    await invoke('rework_task', { args });
+    await api.reworkTask(args);
     rework.prompt = '';
     rework.maxTokens = '';
     await refreshAll();
@@ -266,7 +209,7 @@ async function submitRework() {
 async function acceptTask() {
   working.value = true;
   try {
-    await invoke('accept_task', { id: props.taskId, evidence: evidence.value });
+    await api.acceptTask(props.taskId, evidence.value);
     evidence.value = '';
     await refreshAll();
   } catch (value) {
@@ -280,7 +223,7 @@ async function closeTask() {
   if (!confirm('关闭任务并停止 Runtime？Worktree 和分支会保留。')) return;
   working.value = true;
   try {
-    await invoke('close_task', { id: props.taskId });
+    await api.closeTask(props.taskId);
     await refreshAll();
   } catch (value) {
     error.value = String(value);
@@ -293,7 +236,7 @@ async function cancelTask() {
   if (!confirm('取消当前任务？')) return;
   working.value = true;
   try {
-    await invoke('cancel_task', { id: props.taskId });
+    await api.cancelTask(props.taskId);
     await refreshAll();
   } catch (value) {
     error.value = String(value);
@@ -306,7 +249,7 @@ async function cleanWorktree() {
   if (!confirm('仅删除干净 Worktree，分支会保留。继续？')) return;
   working.value = true;
   try {
-    await invoke('cleanup_worktree', { id: props.taskId });
+    await api.cleanupWorktree(props.taskId);
     await refreshAll();
   } catch (value) {
     error.value = String(value);

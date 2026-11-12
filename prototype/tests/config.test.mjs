@@ -7,10 +7,41 @@ import path from 'node:path';
 import {loadConfiguration} from '../config.mjs';
 import {migrateLegacyData} from '../common.mjs';
 
+const LOCAL_CONFIG_FIXTURE = JSON.parse(
+  fs.readFileSync(new URL('./fixtures/local-config-location.json', import.meta.url), 'utf8'),
+);
+
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-subagent-config-'));
   t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
   return dir;
+}
+
+/** Replace the fixture placeholders with this run's temporary directories. */
+function fill(template, {base, home, config, cwd}) {
+  return template
+    .replaceAll('{base}', base)
+    .replaceAll('{home}', home)
+    .replaceAll('{config}', config)
+    .replaceAll('{cwd}', cwd);
+}
+
+/** Keep the platform data directory inside the fixture on every OS. */
+function isolatedPlatformEnv(dir) {
+  return {
+    LOCALAPPDATA: path.join(dir, 'appdata'),
+    HOME: path.join(dir, 'home-directory'),
+    XDG_DATA_HOME: path.join(dir, 'xdg-data'),
+  };
+}
+
+/** The per-user data root those isolated variables produce. */
+function platformHome(dir) {
+  if (process.platform === 'win32') return path.join(dir, 'appdata', 'Waxwing');
+  if (process.platform === 'darwin') {
+    return path.join(dir, 'home-directory', 'Library', 'Application Support', 'Waxwing');
+  }
+  return path.join(dir, 'xdg-data', 'waxwing');
 }
 
 test('configuration resolves public paths, local overrides, and environment overrides', t => {
@@ -30,7 +61,9 @@ test('configuration resolves public paths, local overrides, and environment over
     usageLimits: {enabled: true},
   }));
 
-  const local = loadConfiguration({here: dir, env: {}});
+  const local = loadConfiguration({here: dir, env: isolatedPlatformEnv(dir)});
+  assert.equal(local.localConfigPath, path.join(dir, 'config.local.json'));
+  assert.equal(local.localConfigSource, 'legacy');
   assert.equal(local.config.root, path.resolve(dir, 'local-data'));
   assert.equal(local.config.researchRoot, path.resolve(dir, 'local-data-research'));
   assert.equal(local.config.dshRepo, path.resolve(dir, '../public-dsh'));
@@ -44,6 +77,7 @@ test('configuration resolves public paths, local overrides, and environment over
   const overridden = loadConfiguration({
     here: dir,
     env: {
+      ...isolatedPlatformEnv(dir),
       DSH_SUBAGENT_ROOT: '../env-data',
       DSH_SUBAGENT_PROVIDERS_DIR: '../env-providers',
       DSH_SUBAGENT_PORT: '43210',
@@ -75,6 +109,123 @@ test('configuration rejects invalid ports and malformed JSON', t => {
     () => loadConfiguration({here: dir, env: {}}),
     /Invalid configuration/,
   );
+});
+
+test('the local config location matches the table shared with the Rust desktop', t => {
+  for (const item of LOCAL_CONFIG_FIXTURE.cases) {
+    const base = fixture(t);
+    const configDir = path.join(base, 'config');
+    const homeDir = path.join(base, 'home');
+    fs.mkdirSync(configDir, {recursive: true});
+    fs.writeFileSync(path.join(configDir, 'config.json'), '{}\n');
+    if (item.homeFile) {
+      fs.mkdirSync(homeDir, {recursive: true});
+      fs.writeFileSync(path.join(homeDir, 'config.local.json'), '{}\n');
+    }
+    if (item.legacyFile) {
+      fs.writeFileSync(path.join(configDir, 'config.local.json'), '{}\n');
+    }
+
+    const vars = {base, home: homeDir, config: configDir, cwd: process.cwd()};
+    const env = {WAXWING_CONFIG: path.join(configDir, 'config.json')};
+    for (const [key, value] of Object.entries(item.env)) env[key] = fill(value, vars);
+
+    const loaded = loadConfiguration({here: configDir, env});
+    assert.equal(loaded.localConfigPath, path.resolve(fill(item.expect.path, vars)), item.name);
+    assert.equal(loaded.localConfigSource, item.expect.source, item.name);
+  }
+});
+
+test('a local file in the per-user directory anchors relative paths there', t => {
+  const dir = fixture(t);
+  const configDir = path.join(dir, 'config');
+  const homeDir = platformHome(dir);
+  fs.mkdirSync(configDir, {recursive: true});
+  fs.mkdirSync(homeDir, {recursive: true});
+  fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({root: './public-data'}));
+  fs.writeFileSync(path.join(homeDir, 'config.local.json'), JSON.stringify({
+    root: './local-data',
+    providersDir: './local-providers',
+    node: './bin/node',
+  }));
+
+  const loaded = loadConfiguration({here: configDir, env: isolatedPlatformEnv(dir)});
+
+  // The file's own location comes from the platform directory, never from
+  // `root`; only the data root follows that value.
+  assert.equal(loaded.localConfigPath, path.join(homeDir, 'config.local.json'));
+  assert.equal(loaded.localConfigSource, 'home');
+  assert.equal(loaded.config.root, path.join(homeDir, 'local-data'));
+  assert.equal(loaded.config.researchRoot, path.join(homeDir, 'local-data-research'));
+  assert.equal(loaded.config.providersDir, path.join(homeDir, 'local-providers'));
+  assert.equal(loaded.config.node, path.join(homeDir, 'bin', 'node'));
+});
+
+test('a legacy local file keeps config.json as its relative base', t => {
+  const dir = fixture(t);
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({root: './public-data'}));
+  fs.writeFileSync(path.join(dir, 'config.local.json'), JSON.stringify({
+    root: './legacy-data',
+    node: './bin/node',
+  }));
+
+  const loaded = loadConfiguration({here: dir, env: isolatedPlatformEnv(dir)});
+
+  assert.equal(loaded.localConfigSource, 'legacy');
+  assert.equal(loaded.localConfigPath, path.join(dir, 'config.local.json'));
+  assert.equal(loaded.config.root, path.join(dir, 'legacy-data'));
+  assert.equal(loaded.config.node, path.join(dir, 'bin', 'node'));
+});
+
+test('the per-user file replaces the legacy file instead of merging with it', t => {
+  const dir = fixture(t);
+  const homeDir = platformHome(dir);
+  fs.mkdirSync(homeDir, {recursive: true});
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    defaultProvider: 'public',
+    usageLimits: {enabled: false, warnRequests: 10},
+  }));
+  fs.writeFileSync(path.join(dir, 'config.local.json'), JSON.stringify({
+    defaultProvider: 'legacy',
+    root: './legacy-data',
+    usageLimits: {enabled: true},
+  }));
+  fs.writeFileSync(path.join(homeDir, 'config.local.json'), JSON.stringify({
+    defaultProvider: 'home',
+    usageLimits: {warnRequests: 42},
+  }));
+
+  const loaded = loadConfiguration({here: dir, env: isolatedPlatformEnv(dir)});
+
+  assert.equal(loaded.localConfigSource, 'home');
+  assert.equal(loaded.config.defaultProvider, 'home');
+  assert.equal(loaded.config.root, homeDir, 'the legacy root is not read');
+  assert.deepEqual(loaded.config.usageLimits, {enabled: false, warnRequests: 42});
+});
+
+test('an explicit local file is the only local layer', t => {
+  const dir = fixture(t);
+  const homeDir = path.join(dir, 'home');
+  const explicit = path.join(dir, 'custom', 'local.json');
+  fs.mkdirSync(homeDir, {recursive: true});
+  fs.mkdirSync(path.dirname(explicit), {recursive: true});
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({defaultProvider: 'public'}));
+  fs.writeFileSync(path.join(dir, 'config.local.json'), JSON.stringify({defaultProvider: 'legacy'}));
+  fs.writeFileSync(path.join(homeDir, 'config.local.json'), JSON.stringify({defaultProvider: 'home'}));
+  fs.writeFileSync(explicit, JSON.stringify({defaultProvider: 'explicit'}));
+
+  const loaded = loadConfiguration({
+    here: dir,
+    env: {
+      ...isolatedPlatformEnv(dir),
+      WAXWING_HOME: homeDir,
+      WAXWING_LOCAL_CONFIG: explicit,
+    },
+  });
+
+  assert.equal(loaded.localConfigSource, 'env');
+  assert.equal(loaded.localConfigPath, explicit);
+  assert.equal(loaded.config.defaultProvider, 'explicit');
 });
 
 test('legacy migration copies task data once and retains the old directory', t => {

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {createHash} from 'node:crypto';
+import {sha256} from '../storage/durable-file.mjs';
 
 const DEFAULT_POLICY_FILE = 'execution-policy.md';
 
@@ -10,7 +10,7 @@ function shortMessage(error) {
 }
 
 function digestText(text) {
-  return createHash('sha256').update(text).digest('hex');
+  return sha256(text);
 }
 
 function isPlainObject(value) {

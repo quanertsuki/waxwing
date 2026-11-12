@@ -7,13 +7,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before manager.mjs/common.mjs so the environment
 // is fixed before common.mjs resolves its data root.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {config,ROOT,RUNS} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {config,root:ROOT,runsDir:RUNS}=runtimeContext();
 import {budgetFileFor,readRoundBudget,writeRoundBudget} from '../budget.mjs';
 
 // Defense in depth: refuse to run any createManager call (which calls
@@ -29,28 +30,25 @@ fs.rmSync(base,{recursive:true,force:true});fs.mkdirSync(base,{recursive:true});
 
 const seen=[];
 function fakeFork() {
-  const child=new EventEmitter();
-  child.stdout=new EventEmitter();child.stderr=new EventEmitter();
-  child.connected=true;child.exitCode=null;child.pid=4242;
-  child.send=message=>{queueMicrotask(()=>onMessage(message,child));};
-  child.kill=()=>{child.exitCode=0;child.emit('exit',0);};
-  return child;
-}
-function onMessage(message,child) {
-  if(message.kind==='close') {child.exitCode=0;setImmediate(()=>child.emit('exit',0));return;}
-  if(message.kind!=='run')return;
-  seen.push({id:message.task.id,sessionId:message.task.sessionId,maxTokens:message.maxTokens,effort:message.effort,budgetFile:message.budgetFile});
-  // Exactly what worker.mjs does before harness.run: only the DSH SDK path
-  // publishes a round budget file.
-  if(message.budgetFile)writeRoundBudget(message.budgetFile,message.maxTokens);
-  child.emit('message',{kind:'ready',roundId:message.roundId,ownerMarker:message.ownerMarker});
-  child.emit('message',{kind:'ack',roundId:message.roundId});
-  const finish=()=>{
-    child.emit('message',{kind:'result',roundId:message.roundId,text:`budget=${message.maxTokens}`,finishReason:'completed'});
-    child.emit('message',{kind:'released',roundId:message.roundId});
-  };
-  if(message.prompt.includes('[hold]'))return;
-  if(message.prompt.includes('[slow]'))setTimeout(finish,300);else setImmediate(finish);
+  return createFakeWorker({
+    pid: 4242,
+    onRun: ({message, reply}) => {
+      const roundId = message.roundId;
+      seen.push({id: message.task.id, sessionId: message.task.sessionId, maxTokens: message.maxTokens,
+        effort: message.effort, budgetFile: message.budgetFile});
+      // Exactly what worker.mjs does before harness.run: only the DSH SDK path
+      // publishes a round budget file.
+      if (message.budgetFile) writeRoundBudget(message.budgetFile, message.maxTokens);
+      reply.ready({roundId, ownerMarker: message.ownerMarker});
+      reply.ack(roundId);
+      const finish = () => {
+        reply.result(roundId, {text: `budget=${message.maxTokens}`});
+        reply.release(roundId);
+      };
+      if (message.prompt.includes('[hold]')) return;
+      if (message.prompt.includes('[slow]')) setTimeout(finish, 300); else setImmediate(finish);
+    },
+  });
 }
 const manager=createManager({forkWorker:fakeFork});
 let counter=0;

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Waxwing `0.1.x` is a preview release and receives security fixes on a
+Waxwing `0.x` releases are previews and receive security fixes on a
 best-effort basis. Modified forks and older commits are not supported.
 
 ## Report a vulnerability privately
@@ -46,8 +46,31 @@ Waxwing does not assume:
 - Requests carrying a browser `Origin` header are rejected.
 - A task workspace cannot equal, contain, or be nested inside the managed data
   directory.
-- Waxwing terminates only a spawned runtime whose PID, task ID, owner marker,
-  and command line match the recorded identity.
+- Waxwing terminates only its own runtimes. A forced stop kills through the
+  child-process handle the manager spawned, which cannot point at a recycled
+  PID. After a restart, a runtime known only from its recorded PID is
+  terminated only when its PID, task ID, owner marker, and command line match;
+  otherwise its workspace lock is retained for manual handling.
+- The Worker's `write_file` tool writes only inside the task workspace, so a
+  copied absolute path cannot bypass worktree isolation. This is a guard
+  against mistakes, not a sandbox: the Worker also has a shell tool and can
+  read files outside the workspace.
+
+## Deletion authorization
+
+Deleting a task's scratch records requires a grant recorded by `grant_delete`.
+The grant protects against a well-behaved Delegating Agent deleting records by
+mistake:
+
+- the MCP catalogue does not offer `grant_delete`
+- `waxwing grant-delete` refuses to run without an interactive terminal and
+  asks the human to type the complete task ID
+- the grant is written to disk before it takes effect
+
+It is not a defence against a hostile process in the same operating-system
+account. Such a process can read the manager's bearer token and call
+`grant_delete` over HTTP, and it can also delete the data directory directly.
+That is inside the trust boundary described above.
 - Provider API keys are resolved from environment variables and are not copied
   into task records.
 - The production Tauri WebView uses a Content Security Policy.

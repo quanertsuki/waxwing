@@ -1,5 +1,7 @@
-const TERMINAL_TASK = new Set(['awaiting_review', 'failed', 'cancelled', 'closed', 'accepted']);
-const ACTIVE_TASK = new Set(['created', 'running', 'stopping']);
+import {ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES} from '../tasks/lifecycle.mjs';
+
+const TERMINAL_TASK = TERMINAL_TASK_STATUSES;
+const ACTIVE_TASK = ACTIVE_TASK_STATUSES;
 const TERMINAL_BATCH = new Set(['completed', 'partial', 'failed', 'cancelled']);
 
 function countByShardStatus(shards) {
@@ -37,12 +39,13 @@ export function aggregateBatchStatus(batch) {
 }
 
 /**
- * Classify one task record for a shard. `capture` is the only state that may
- * write evidence; `finalize` means evidence is safe and runtime release is
- * still pending, so a batch must not become terminal yet.
+ * Classify one narrow shard view for a shard. `capture` is the only state that
+ * may write evidence; `finalize` means evidence is safe and runtime release is
+ * still pending, so a batch must not become terminal yet. The research service
+ * never reads a task record or a runtime handle.
  */
-export function shardTransition(shard, task) {
-  if (!task) {
+export function shardTransition(shard, view) {
+  if (!view) {
     return {
       dirty: shard.status !== 'failed',
       patch: {status: 'failed', error: `Task record is missing: ${shard.taskId}`},
@@ -53,13 +56,13 @@ export function shardTransition(shard, task) {
   }
   const patch = {};
   let dirty = false;
-  if (shard.taskStatus !== task.status) {
-    patch.taskStatus = task.status;
+  if (shard.taskStatus !== view.status) {
+    patch.taskStatus = view.status;
     dirty = true;
   }
-  if (TERMINAL_TASK.has(task.status)) {
+  if (TERMINAL_TASK.has(view.status)) {
     const capture = !shard.resultCaptured;
-    const finalize = task.status !== 'closed' && !shard.runtimeReleased;
+    const finalize = view.status !== 'closed' && !shard.runtimeReleased;
     if (capture) dirty = true;
     if (finalize && !shard.finalizing) {
       patch.finalizing = true;
@@ -67,7 +70,7 @@ export function shardTransition(shard, task) {
     }
     return {dirty, patch, capture, finalize, terminal: true};
   }
-  if (ACTIVE_TASK.has(task.status) && shard.status !== 'cancelled') {
+  if (ACTIVE_TASK.has(view.status) && shard.status !== 'cancelled') {
     if (shard.status !== 'running') {
       patch.status = 'running';
       dirty = true;
@@ -75,6 +78,21 @@ export function shardTransition(shard, task) {
     return {dirty, patch, capture: false, finalize: false, terminal: false};
   }
   return {dirty, patch, capture: false, finalize: false, terminal: false};
+}
+
+/**
+ * The shard status and error a captured view implies. Evidence classification
+ * lives here, not in the capture reader, so every consumer sees one rule.
+ */
+export function shardCapturePatch(view) {
+  const finishReason = view?.finishReason ?? null;
+  if (view?.status === 'cancelled') {
+    return {status: 'cancelled', error: view.error ?? 'Research shard cancelled'};
+  }
+  if (view?.status === 'failed' || finishReason === 'error') {
+    return {status: 'failed', error: view.error ?? 'Research shard failed without an error message'};
+  }
+  return {status: 'completed', error: null};
 }
 
 export function isTerminalBatch(status) {

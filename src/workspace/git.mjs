@@ -1,7 +1,7 @@
 import {execFileSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import {canonicalExistingPath, sameOrDescendantPath} from '../../prototype/common.mjs';
+import {canonicalExistingPath, sameOrDescendantPath} from '../paths/path-utils.mjs';
 
 function run(cwd, args, options = {}) {
   try {

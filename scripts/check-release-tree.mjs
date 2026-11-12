@@ -1,7 +1,9 @@
 import {execFileSync} from 'node:child_process';
 import {existsSync, readdirSync, readFileSync} from 'node:fs';
 import path from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export function walk(directory, prefix = '') {
   const files = [];
@@ -38,7 +40,24 @@ function discoverReleaseTree(cwd = process.cwd()) {
   return {root, files, sourceCheckout};
 }
 
-export const required = [
+/**
+ * Every JavaScript module under `src/`, relative to the repository root.
+ *
+ * The published package ships all of `src/`, and a missing module only shows
+ * up at import time, so the list is discovered instead of hand-maintained.
+ * `src/app.mjs` stays in the static list as the canary for a missing `src/`.
+ */
+export function discoverSourceModules(root = REPO_ROOT) {
+  const sourceDir = path.join(root, 'src');
+  if (!existsSync(sourceDir)) return [];
+  return walk(sourceDir)
+    .filter(file => file.endsWith('.mjs'))
+    .map(file => `src/${file}`)
+    .sort();
+}
+
+/** Non-source files that the package or desktop build must always contain. */
+export const fixedRequired = [
   'bin/waxwing.mjs',
   'bin/waxwing-mcp.mjs',
   'desktop/src-tauri/src/tasks.rs',
@@ -47,31 +66,11 @@ export const required = [
   'prototype/manager.mjs',
   'prototype/server.mjs',
   'scripts/generate-task-contract.mjs',
-  'src/acceptance/service.mjs',
+  'scripts/check-release-tree.mjs',
   'src/app.mjs',
-  'src/research/capture.mjs',
-  'src/research/report.mjs',
-  'src/research/repository.mjs',
-  'src/research/service.mjs',
-  'src/research/state.mjs',
-  'src/runtime/close-outcome.mjs',
-  'src/runtime/lifecycle.mjs',
-  'src/runtime/module.mjs',
-  'src/runtime/outcome.mjs',
-  'src/runtime/protocol.mjs',
-  'src/runtime/supervisor.mjs',
-  'src/tasks/change-notifier.mjs',
-  'src/tasks/command.mjs',
-  'src/tasks/lifecycle.mjs',
-  'src/tasks/view.mjs',
-  'src/tasks/transaction.mjs',
-  'src/tasks/repository.mjs',
-  'src/usage/execution-policy.mjs',
-  'src/usage/module.mjs',
-  'src/usage/policy.mjs',
-  'src/usage/service.mjs',
-  'src/workspace/lease-manager.mjs',
 ];
+
+export const required = [...new Set([...fixedRequired, ...discoverSourceModules()])].sort();
 
 // The npm package ships the CLI and MCP tree without the desktop sources, so an
 // installed package is checked against the subset it publishes while a Git

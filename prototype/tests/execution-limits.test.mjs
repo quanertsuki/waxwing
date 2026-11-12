@@ -10,7 +10,10 @@ import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before common.mjs or manager.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
-import {ROOT,config} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const ROOT=runtimeContext().root;
+// Test-owned configuration: mutations affect only this manager instance.
+const config={...runtimeContext().config};
 import {usageForStatus} from '../usage.mjs';
 import {createManager} from '../manager.mjs';
 import * as cli from '../cli.mjs';
@@ -106,7 +109,7 @@ function makeWorker({delay=250}={}) {
 }
 
 const worker=makeWorker();
-const manager=createManager({forkWorker:worker.fork});
+const manager=createManager({forkWorker:worker.fork,config});
 let workspaceCounter=0;
 const newWorkspace=()=>{
     const dir=path.join(workspaceBase,`ws-${++workspaceCounter}`);
@@ -302,7 +305,7 @@ test('old tasks without usageLimits use current global limits without rewriting 
     const raw=JSON.parse(fs.readFileSync(file,'utf8'));
     delete raw.usageLimits;
     fs.writeFileSync(file,JSON.stringify(raw,null,2));
-    const restored=createManager({forkWorker:worker.fork});
+    const restored=createManager({forkWorker:worker.fork,config});
     restored.restore();
     try {
         const before=fs.readFileSync(file,'utf8');
@@ -584,7 +587,7 @@ test('override cannot bypass running, closed, accepted, maxRounds, or missing-ru
 
     const live=await create();
     await settled(live.id);
-    const restored=createManager({forkWorker:worker.fork});
+    const restored=createManager({forkWorker:worker.fork,config});
     restored.restore();
     try {
         await assert.rejects(()=>restored.action('rework',{id:live.id,prompt:'resume',...override}),
@@ -645,7 +648,7 @@ test('unavailable usage reports unavailable, warns, and does not block rework',a
 
 test('list flags only non-ok tasks and list/status stay within the size targets',async()=>{
     const listWorker=makeWorker();
-    const listManager=createManager({forkWorker:listWorker.fork});
+    const listManager=createManager({forkWorker:listWorker.fork,config});
     try {
         const workspaces=path.join(workspaceBase,'list');
         fs.mkdirSync(workspaces,{recursive:true});

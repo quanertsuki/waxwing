@@ -11,15 +11,16 @@ flowchart LR
   Gateway["Loopback HTTP gateway<br/>127.0.0.1 + bearer token"]
 
   subgraph Manager["Local manager: single state owner"]
+    Ops["Operation catalogue<br/>schema + entry policy + codes"]
     Tasks["TaskLifecycle + TaskRepository<br/>status + atomic records"]
-    TaskCmd["TaskCommand<br/>create/rework/preflight"]
-    Outcome["RuntimeOutcome<br/>terminal/fallback/ack-timeout"]
-    Runtime["Runtime<br/>round IDs + heartbeat + recovery"]
-    Supervisor["RuntimeSupervisor<br/>release + exit gates"]
+    TaskCmd["TaskCommand<br/>create validation"]
+    Rework["TaskRework<br/>eligibility + limits + override"]
+    Settlement["RuntimeSettlement<br/>terminal/failure/close/recovery"]
+    Runtime["Runtime<br/>round IDs + heartbeat + gates"]
     Lease["WorkspaceLeaseManager<br/>locks + worktrees + diffs"]
     Acceptance["AcceptanceService<br/>evidence + reports + delete grants"]
     Research["ResearchBatchService + ResearchState<br/>parallel scratch shards + report"]
-    Usage["UsageModule<br/>indexing, limits, override, rework"]
+    Usage["UsageModule<br/>indexing, limits, override"]
     TaskView["TaskView<br/>bounded read contract"]
     Providers["ProviderRegistry<br/>DSH SDK + OpenAI-compatible"]
   end
@@ -42,17 +43,23 @@ flowchart LR
   CLI --> Gateway
   MCP --> Gateway
   Desktop --> Gateway
-
+  CLI -. schema .-> Ops
+  MCP -. schema .-> Ops
+  Gateway --> Ops
   Gateway --> TaskCmd
+  Gateway --> Rework
   Gateway --> TaskView
   Gateway --> Tasks
   Gateway --> Acceptance
   Gateway --> Research
   Gateway --> Usage
   TaskCmd --> Tasks
-  Tasks <--> Outcome
+  Rework --> Usage
+  Rework --> Runtime
+  Rework --> Lease
+  Tasks <--> Settlement
   Tasks <--> Runtime
-  Runtime --> Supervisor
+  Runtime --> Settlement
   Tasks <--> Lease
   Tasks <--> Data
   Acceptance --> Data

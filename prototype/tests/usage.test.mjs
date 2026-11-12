@@ -4,13 +4,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before common.mjs or manager.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
-import {ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {root:ROOT,config}=runtimeContext();
 import {usageForList,usageForStatus,usageForTask,usageForView} from '../usage.mjs';
 import {createManager} from '../manager.mjs';
+import {UsageModule} from '../../src/usage/module.mjs';
 import {parseStatusArgs} from '../cli.mjs';
 import {catalogue,handle} from '../mcp.mjs';
 
@@ -442,22 +444,7 @@ test('metric serialization and the index never contain message bodies, tool argu
 });
 
 function fakeFork() {
-    const child=new EventEmitter();
-    child.stdout=new EventEmitter();child.stderr=new EventEmitter();
-    child.connected=true;child.exitCode=null;child.pid=4545;
-    child.send=message=>{queueMicrotask(()=>onMessage(message,child));};
-    child.kill=()=>{child.exitCode=0;child.emit('exit',0);};
-    return child;
-}
-function onMessage(message,child) {
-    if(message.kind==='close') {child.exitCode=0;setImmediate(()=>child.emit('exit',0));return;}
-    if(message.kind!=='run')return;
-    child.emit('message',{kind:'ready',roundId:message.roundId,ownerMarker:message.ownerMarker});
-    child.emit('message',{kind:'ack',roundId:message.roundId});
-    setImmediate(()=>{
-        child.emit('message',{kind:'result',roundId:message.roundId,text:'done',finishReason:'completed'});
-        child.emit('message',{kind:'released',roundId:message.roundId});
-    });
+    return createFakeWorker({pid: 4545});
 }
 const manager=createManager({forkWorker:fakeFork});
 let workspaceCounter=0;
@@ -587,18 +574,71 @@ test('direct usage exports never throw on a damaged task limit override',()=>{
         usageLimits:{enabled:'yes'},
     };
     const dir=path.join(base,'damaged-limits');
+    // The module falls back to the configured limits instead of hiding the
+    // metrics; the damaged override is never evaluated directly.
     const snapshot=usageForTask(task,dir);
-    assert.equal(snapshot.available,false);
-    assert.match(snapshot.statusUsage.error,/enabled must be a boolean/);
+    assert.equal(snapshot.available,true);
+    assert.equal(snapshot.statusUsage.available,true);
+    assert.notEqual(snapshot.statusUsage.limits.enabled,'yes');
     const list=usageForList(task,dir);
-    assert.equal(list.available,false);
-    assert.match(list.error,/enabled must be a boolean/);
+    assert.equal(list.available,true);
     const status=usageForStatus(task,dir);
-    assert.equal(status.usage.available,false);
+    assert.equal(status.usage.available,true);
     assert.deepEqual(status.usageRounds,[]);
     const view=usageForView(task,dir);
-    assert.equal(view.totals.available,false);
+    assert.equal(view.totals.available,true);
     assert.deepEqual(view.requests,[]);
+});
+
+test('list, status, and usage views agree on cost and limits for one task',()=>{
+    const fixture=newTask({events:[
+        roundStarted(1,beijing(10)),
+        assistant(beijing(10,0,10),{usage:tokens(100,0,0,20)}),
+        roundFinished(beijing(10,0,20)),
+    ]});
+    const usage=new UsageModule({
+        configuration:{
+            limits:{enabled:true,warnRequests:1,blockRequests:5,warnCostCny:100,blockCostCny:200},
+            providersDir:config.providersDir,
+            pricingFile:path.join(PROTOTYPE,'pricing.json'),
+        },
+    });
+    const list=usage.list(fixture.task,fixture.dir);
+    const status=usage.status(fixture.task,fixture.dir).usage;
+    const view=usage.view(fixture.task,fixture.dir);
+    assert.equal(list.requests,status.requests);
+    assert.equal(list.estimatedCostCny,status.estimatedCostCny);
+    assert.equal(view.totals.estimatedCostCny,status.estimatedCostCny);
+    assert.equal(view.totals.costComplete,status.costComplete);
+    assert.equal(status.limitState,'warning');
+    assert.equal(view.totals.limitState,status.limitState);
+    assert.equal(list.limitState,undefined,'the list summary stays bounded');
+});
+
+test('full pricing uses the source that knows the task model',()=>{
+    const providersDir=path.join(base,'multi-source-providers');
+    const providerDir=path.join(providersDir,'provider-a');
+    fs.mkdirSync(providerDir,{recursive:true});
+    fs.writeFileSync(path.join(providerDir,'pricing.json'),JSON.stringify({
+        currency:'CNY',unit:'per 1M tokens',effectiveAt:'2026-10-20',source:'https://provider.invalid/pricing',
+        peakRule:{timezone:'Asia/Shanghai',weekdays:[1,2,3,4,5],windows:[['09:00','12:00']],holidayCalendarModeled:false},
+        models:{'provider-only':{alias:['provider-alias'],peak:{cacheHit:1,cacheMiss:2,output:3},
+            offPeak:{cacheHit:1,cacheMiss:2,output:3}}},
+    }));
+    const fixture=newTask({events:[
+        roundStarted(1,beijing(10)),
+        assistant(beijing(10,0,10),{usage:tokens(100,0,0,20),model:'deepseek-flash'}),
+        roundFinished(beijing(10,0,20)),
+    ]});
+    fixture.task.provider={name:'provider-a'};
+    const usage=new UsageModule({configuration:{
+        limits:{enabled:false},providersDir,pricingFile:path.join(PROTOTYPE,'pricing.json'),
+    }});
+    const status=usage.status(fixture.task,fixture.dir).usage;
+    const view=usage.view(fixture.task,fixture.dir);
+    assert.equal(status.pricing.source,'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/');
+    assert.equal(view.pricing.source,status.pricing.source);
+    assert.ok(view.pricing.models['deepseek-flash'],'the pricing belongs to the source that knows the model');
 });
 
 test.after(async()=>{await manager.shutdown();});

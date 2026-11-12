@@ -2,6 +2,7 @@ const ALLOWED = {
   run: ['created', 'awaiting_review', 'failed', 'cancelled'],
   finish: ['running'],
   fail: ['running'],
+  fail_stop: ['stopping'],
   begin_stop: ['created', 'running', 'awaiting_review', 'failed', 'cancelled', 'accepted'],
   accept: ['awaiting_review'],
   stop: ['created', 'stopping', 'awaiting_review', 'failed', 'cancelled', 'accepted'],
@@ -9,10 +10,23 @@ const ALLOWED = {
   delete: ['closed'],
 };
 
+/** Statuses where a task still owns or may still acquire a runtime. */
+export const ACTIVE_TASK_STATUSES = new Set(['created', 'running', 'stopping']);
+
+/** Statuses after which no round can start without a new task. */
+export const TERMINAL_TASK_STATUSES = new Set([
+  'awaiting_review',
+  'failed',
+  'cancelled',
+  'closed',
+  'accepted',
+]);
+
 const NEXT_STATUS = {
   run: 'running',
   finish: 'awaiting_review',
   fail: 'failed',
+  fail_stop: 'failed',
   begin_stop: 'stopping',
   accept: 'accepted',
   stop: 'cancelled',

@@ -69,11 +69,13 @@ workspace/
   deepseek-harness/
 ```
 
-路径不同时，创建本机覆盖文件：
-
-```powershell
-Copy-Item prototype/config.local.example.json prototype/config.local.json
-```
+路径不同时，创建本机覆盖文件。它应放在每用户数据目录（Windows 为
+`%LOCALAPPDATA%\Waxwing\config.local.json`，macOS 为
+`~/Library/Application Support/Waxwing/config.local.json`，Linux 为
+`$XDG_DATA_HOME/waxwing/config.local.json`），或 `WAXWING_LOCAL_CONFIG`
+指定的位置。把 `prototype/config.local.example.json` 复制到那里，不要留在
+安装目录里：升级会替换该目录。新位置没有文件时，旧版留在
+`prototype/config.local.json` 的覆盖文件仍会被读取。
 
 使用 OpenAI 兼容端点时，把 `examples/providers/openai-compatible.json`
 复制到 `<WAXWING_HOME>/providers`（默认目录见下文），设置 `apiKeyEnv`，
@@ -259,8 +261,14 @@ Worker 每 5 秒发送心跳。20 秒无心跳只把运行时标记为 `unhealth
 配置层级：
 
 1. `prototype/config.json` 或 `WAXWING_CONFIG`
-2. `prototype/config.local.json` 或 `WAXWING_LOCAL_CONFIG`
+2. 本地覆盖文件：`WAXWING_LOCAL_CONFIG`，其次
+   `<平台数据目录>/config.local.json`，最后是新位置没有文件时的旧版
+   `prototype/config.local.json`
 3. 环境变量
+
+本地覆盖文件里的相对路径以它自己所在的目录为基准；`config.json` 里的相对
+路径以 `config.json` 所在目录为基准。桌面端设置页写入新位置，并把从旧文件
+继承来的相对路径转成绝对路径，迁移后仍指向原来的目录。旧文件保留不删。
 
 常用环境变量：
 

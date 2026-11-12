@@ -1,9 +1,10 @@
+use crate::manager;
 use crate::paths;
-use crate::transport::{clamp_page_limit, error_message, health_from_result, ManagerHealth};
+use crate::transport::{clamp_page_limit, ManagerHealth};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 #[derive(Serialize, Deserialize)]
@@ -141,6 +142,8 @@ pub struct TaskDetail {
     pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
     pub workspace: String,
     #[serde(default)]
     pub source_workspace: Option<String>,
@@ -210,19 +213,8 @@ pub struct TaskDetail {
     pub cleanup_authorized: Option<bool>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
-}
-
-fn read_server_token() -> Result<String, String> {
-    let token_path = paths::server_token()?;
-    std::fs::read_to_string(&token_path)
-        .map(|t| t.trim().to_string())
-        .map_err(|e| {
-            format!(
-                "Cannot read server token at {}: {}",
-                token_path.display(),
-                e
-            )
-        })
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 fn manager_entry_argument(manager_script: &Path) -> Result<&OsStr, String> {
@@ -231,36 +223,9 @@ fn manager_entry_argument(manager_script: &Path) -> Result<&OsStr, String> {
         .ok_or_else(|| "Manager script has no file name".to_string())
 }
 
-async fn manager_request(
-    action: &str,
-    args: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let token = read_server_token()?;
-    let client = reqwest::Client::new();
-    let response = client
-        .post(paths::manager_url()?)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({"action": action, "args": args}))
-        .send()
-        .await
-        .map_err(|e| format!("Manager request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        return Err(error_message(status, &body));
-    }
-
-    response
-        .json()
-        .await
-        .map_err(|e| format!("Invalid JSON response: {}", e))
-}
-
 #[tauri::command]
 pub async fn get_tasks() -> Result<Vec<Task>, String> {
-    let result = manager_request("list", serde_json::json!({})).await?;
+    let result = manager::request("list", serde_json::json!({})).await?;
     let tasks: Vec<Task> =
         serde_json::from_value(result).map_err(|e| format!("Failed to parse task list: {}", e))?;
     Ok(tasks)
@@ -268,7 +233,7 @@ pub async fn get_tasks() -> Result<Vec<Task>, String> {
 
 #[tauri::command]
 pub async fn get_task_detail(id: String) -> Result<TaskDetail, String> {
-    let result = manager_request("status", serde_json::json!({"id": id})).await?;
+    let result = manager::request("status", serde_json::json!({"id": id})).await?;
     serde_json::from_value(result).map_err(|e| format!("Failed to parse task detail: {}", e))
 }
 
@@ -279,7 +244,7 @@ pub async fn get_task_view(
     offset: Option<i64>,
     limit: Option<i64>,
 ) -> Result<serde_json::Value, String> {
-    manager_request(
+    manager::request(
         "status",
         serde_json::json!({
             "id": id,
@@ -293,32 +258,32 @@ pub async fn get_task_view(
 
 #[tauri::command]
 pub async fn create_task(args: serde_json::Value) -> Result<serde_json::Value, String> {
-    manager_request("create", args).await
+    manager::request("create", args).await
 }
 
 #[tauri::command]
 pub async fn rework_task(args: serde_json::Value) -> Result<serde_json::Value, String> {
-    manager_request("rework", args).await
+    manager::request("rework", args).await
 }
 
 #[tauri::command]
 pub async fn cleanup_worktree(id: String) -> Result<serde_json::Value, String> {
-    manager_request("cleanup_worktree", serde_json::json!({"id": id})).await
+    manager::request("cleanup_worktree", serde_json::json!({"id": id})).await
 }
 
 #[tauri::command]
 pub async fn cancel_task(id: String) -> Result<serde_json::Value, String> {
-    manager_request("cancel", serde_json::json!({"id": id})).await
+    manager::request("cancel", serde_json::json!({"id": id})).await
 }
 
 #[tauri::command]
 pub async fn close_task(id: String) -> Result<serde_json::Value, String> {
-    manager_request("close", serde_json::json!({"id": id})).await
+    manager::request("close", serde_json::json!({"id": id})).await
 }
 
 #[tauri::command]
 pub async fn accept_task(id: String, evidence: String) -> Result<serde_json::Value, String> {
-    manager_request(
+    manager::request(
         "accept",
         serde_json::json!({"id": id, "evidence": evidence}),
     )
@@ -327,30 +292,7 @@ pub async fn accept_task(id: String, evidence: String) -> Result<serde_json::Val
 
 #[tauri::command]
 pub async fn is_manager_running() -> Result<ManagerHealth, String> {
-    // Reading the token fails when no manager has written it yet.
-    let token = match read_server_token() {
-        Ok(t) if !t.is_empty() => t,
-        _ => return Ok(ManagerHealth::NotRunning),
-    };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .post(paths::manager_url()?)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({"action": "health", "args": {}}))
-        .send()
-        .await;
-    let probe = match response {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            Ok((status, response.text().await.unwrap_or_default()))
-        }
-        Err(_) => Err(()),
-    };
-    Ok(health_from_result(probe))
+    manager::health().await
 }
 
 #[tauri::command]
@@ -359,7 +301,8 @@ pub async fn start_manager() -> Result<bool, String> {
         return Ok(true);
     }
 
-    let port = paths::port()?;
+    let location = paths::manager_paths()?;
+    let port = location.port;
     let address = format!("127.0.0.1:{port}");
     let port_busy = std::net::TcpStream::connect_timeout(
         &address
@@ -375,12 +318,12 @@ pub async fn start_manager() -> Result<bool, String> {
         ));
     }
 
-    let manager_script = paths::manager_script()?;
+    let manager_script = PathBuf::from(&location.manager_script);
     let manager_dir = manager_script
         .parent()
         .ok_or_else(|| "Manager script has no containing directory".to_string())?;
     let manager_entry = manager_entry_argument(&manager_script)?;
-    let runtime_dir = paths::data_root()?.join("runtime");
+    let runtime_dir = PathBuf::from(&location.runtime_dir);
     std::fs::create_dir_all(&runtime_dir)
         .map_err(|e| format!("Cannot create runtime directory: {e}"))?;
     let log = OpenOptions::new()
@@ -412,7 +355,7 @@ pub async fn start_manager() -> Result<bool, String> {
             }
             Err(format!(
                 "Manager did not become healthy at {}. Inspect {}.",
-                paths::manager_url()?,
+                location.manager_url,
                 runtime_dir.join("manager.log").display()
             ))
         }
@@ -570,5 +513,173 @@ mod tests {
         assert!(detail.runtime.is_none());
         assert!(detail.usage.is_none());
         assert!(detail.usage_rounds.is_empty());
+    }
+
+    // Field names this crate declares for each manager shape. The bidirectional
+    // test below keeps the fixture and these lists in step: a new fixture field
+    // must be declared here, and a declared field must appear in the fixture
+    // unless it is an explicitly listed legacy extra.
+    const TASK_FIELDS: &[&str] = &[
+        "id",
+        "status",
+        "statusLabel",
+        "roundCount",
+        "provider",
+        "model",
+        "workspace",
+        "sourceWorkspace",
+        "workspaceMode",
+        "workspaceLabel",
+        "branch",
+        "baseCommit",
+        "runtimeHealth",
+        "cleanupAuthorized",
+        "summary",
+        "summaryTruncated",
+        "error",
+        "errorTruncated",
+        "live",
+        "accepted",
+        "effort",
+        "lastRound",
+        "maxTokens",
+        "usage",
+        "createdAt",
+        "updatedAt",
+        "kind",
+        "batchId",
+        "shardId",
+    ];
+    // Optional fields older records and research tasks may carry that the shared
+    // fixture does not exercise.
+    const TASK_LEGACY_EXTRA: &[&str] = &[
+        "sourceWorkspace",
+        "branch",
+        "baseCommit",
+        "summaryTruncated",
+        "errorTruncated",
+        "kind",
+        "batchId",
+        "shardId",
+    ];
+    const TASK_DETAIL_FIELDS: &[&str] = &[
+        "id",
+        "status",
+        "statusLabel",
+        "roundCount",
+        "roundId",
+        "provider",
+        "model",
+        "error",
+        "workspace",
+        "sourceWorkspace",
+        "workspaceMode",
+        "workspaceLabel",
+        "worktreeStatus",
+        "branch",
+        "baseCommit",
+        "live",
+        "accepted",
+        "canRework",
+        "manualActionRequired",
+        "runtimeHealth",
+        "runtimePhase",
+        "sessionId",
+        "runtime",
+        "reworkBlockedReason",
+        "lastRound",
+        "lastEvent",
+        "usage",
+        "usageRounds",
+        "resultPreview",
+        "resultPreviewChars",
+        "resultTotalChars",
+        "resultPreviewComplete",
+        "resultPreviewTruncated",
+        "resultFinishReason",
+        "eventCount",
+        "runtimeReady",
+        "acceptedAt",
+        "dataDirectory",
+        "report",
+        "createdAt",
+        "updatedAt",
+        "cleanupAuthorized",
+        "maxTokens",
+        "effort",
+    ];
+    const TASK_USAGE_FIELDS: &[&str] = &[
+        "available",
+        "requests",
+        "inputTokens",
+        "outputTokens",
+        "estimatedCostCny",
+        "costComplete",
+        "warnings",
+    ];
+    const TASK_DETAIL_USAGE_FIELDS: &[&str] = &[
+        "available",
+        "requests",
+        "inputTokens",
+        "outputTokens",
+        "estimatedCostCny",
+        "costComplete",
+        "limitState",
+        "warnings",
+    ];
+    const TASK_ROUND_FIELDS: &[&str] = &[
+        "number",
+        "roundId",
+        "startedAt",
+        "finishedAt",
+        "maxTokens",
+        "effort",
+    ];
+
+    fn assert_covers(name: &str, value: &serde_json::Value, declared: &[&str], extra: &[&str]) {
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{name} must be an object"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in &keys {
+            assert!(
+                declared.contains(key),
+                "{name}: fixture field {key} is not declared in the Rust struct"
+            );
+        }
+        for field in declared {
+            assert!(
+                keys.contains(field) || extra.contains(field),
+                "{name}: Rust declares {field} but the fixture does not carry it and it is not a listed legacy extra"
+            );
+        }
+    }
+
+    #[test]
+    fn the_contract_fixture_and_the_rust_structs_declare_the_same_fields() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(CONTRACT_FIXTURE).expect("contract fixture must be valid JSON");
+        assert_covers("list", &fixture["list"], TASK_FIELDS, TASK_LEGACY_EXTRA);
+        assert_covers("detail", &fixture["detail"], TASK_DETAIL_FIELDS, &[]);
+        assert_covers(
+            "list.usage",
+            &fixture["list"]["usage"],
+            TASK_USAGE_FIELDS,
+            &[],
+        );
+        assert_covers(
+            "detail.usage",
+            &fixture["detail"]["usage"],
+            TASK_DETAIL_USAGE_FIELDS,
+            &[],
+        );
+        assert_covers(
+            "detail.lastRound",
+            &fixture["detail"]["lastRound"],
+            TASK_ROUND_FIELDS,
+            &["maxTokens"],
+        );
     }
 }

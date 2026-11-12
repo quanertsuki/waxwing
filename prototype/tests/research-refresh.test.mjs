@@ -40,6 +40,20 @@ function workspaceRoot() {
   return root;
 }
 
+/** The narrow shard view the manager supplies; no runtime handle. */
+function viewOf(task) {
+  if (!task) return null;
+  const last = task.rounds?.at(-1);
+  return {
+    id: task.id,
+    status: task.status,
+    error: task.error ?? null,
+    resultText: task.output ?? last?.result?.text ?? '',
+    finishReason: task.finishReason ?? last?.result?.finishReason ?? null,
+    idle: true,
+  };
+}
+
 function serviceFor(root, options = {}) {
   return new ResearchBatchService({
     batchesDir: path.join(root, 'research'),
@@ -47,10 +61,9 @@ function serviceFor(root, options = {}) {
     reportsDir: path.join(root, 'reports'),
     atomicJson,
     createTask: async () => ({id: 'task-unused'}),
-    getTask: options.getTask,
-    closeTask: options.closeTask ?? (async () => {}),
-    cancelTask: async () => {},
-    canCloseTask: () => true,
+    shardView: options.shardView ?? (id => viewOf(options.getTask?.(id))),
+    closeShard: options.closeShard ?? (async () => true),
+    cancelTask: options.cancelTask ?? (async () => {}),
     now: () => '2026-10-28T02:00:00.000Z',
     makeId: () => BATCH,
     files: options.files,
@@ -142,14 +155,66 @@ test('a crash-window planned shard becomes an orphaned terminal shard', async ()
   assert.equal(waited.wait.waitedMs < 1000, true);
 });
 
+test('cancel stops only unfinished shards and keeps completed evidence collectable', async () => {
+  const root = workspaceRoot();
+  const cancelled = [];
+  const taskStates = new Map([
+    ['task-0123456789ab', {...task, id: 'task-0123456789ab', status: 'awaiting_review'}],
+    ['task-0123456789ac', {id: 'task-0123456789ac', status: 'running', rounds: []}],
+  ]);
+  const service = serviceFor(root, {
+    getTask: id => taskStates.get(id),
+    cancelTask: async id => {
+      cancelled.push(id);
+      taskStates.set(id, {...taskStates.get(id), status: 'cancelled'});
+    },
+  });
+  writeBatch(service, batchFile([
+    {
+      id: 'done',
+      subject: 'Finished source',
+      url: null,
+      focus: null,
+      taskId: 'task-0123456789ab',
+      taskStatus: 'awaiting_review',
+      status: 'completed',
+      resultCaptured: true,
+      workspace: null,
+    },
+    {
+      id: 'busy',
+      subject: 'Running source',
+      url: null,
+      focus: null,
+      taskId: 'task-0123456789ac',
+      taskStatus: 'running',
+      status: 'running',
+      workspace: null,
+    },
+  ]));
+  fs.mkdirSync(path.dirname(service.resultFile(BATCH, 'done')), {recursive: true});
+  fs.writeFileSync(service.resultFile(BATCH, 'done'), 'usable evidence');
+
+  const summary = await service.cancel(BATCH);
+  assert.deepEqual(cancelled, ['task-0123456789ac']);
+  assert.equal(summary.status, 'partial');
+  assert.equal(summary.counts.completed, 1);
+  assert.equal(summary.counts.cancelled, 1);
+  assert.equal(summary.shards[1].status, 'cancelled');
+
+  const collected = await service.collect(BATCH);
+  assert.match(fs.readFileSync(collected.report, 'utf8'), /usable evidence/);
+});
+
 test('concurrent status, wait, and collect share one refresh and one close', async () => {
   const root = workspaceRoot();
   let closes = 0;
   const service = serviceFor(root, {
     getTask: () => task,
-    closeTask: async () => {
+    closeShard: async () => {
       closes += 1;
       await new Promise(resolve => setTimeout(resolve, 20));
+      return true;
     },
   });
   writeBatch(service, batchFile([{

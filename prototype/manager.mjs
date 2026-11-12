@@ -4,20 +4,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {fork, spawn} from 'node:child_process';
-import {once} from 'node:events';
-import {config,HERE,ROOT,RUNS,REPORTS,RUNTIME,ensureDirs,atomicJson,cleanEnvironment,
+import {fork} from 'node:child_process';
+import {atomicJson,cleanEnvironment,runtimeContext,
   canonicalPath,canonicalExistingPath,isDriveRoot,sameOrDescendantPath} from './common.mjs';
-import {transition} from '../src/tasks/lifecycle.mjs';
-import {budgetFileFor, parseOptionalMaxTokens, resolveRoundBudget} from './budget.mjs';
-import {DEFAULT_EFFORT, parseOptionalEffort, resolveRoundEffort} from './effort.mjs';
-import {effectiveLimits} from '../src/usage/policy.mjs';
+import {ensureDataDirs} from '../src/config/data-root.mjs';
+import {ACTIVE_TASK_STATUSES, transition} from '../src/tasks/lifecycle.mjs';
+import {budgetFileFor, resolveRoundBudget} from './budget.mjs';
+import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
-import {ExecutionPolicy} from '../src/usage/execution-policy.mjs';
-import {loadProvider, loadProviders} from '../src/providers/registry.mjs';
+import {ExecutionPolicy} from '../src/tasks/execution-policy.mjs';
+import {capabilitiesFor, prepareTask, resolveProvider} from '../src/providers/registry.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
-import {RuntimeLifecycle} from '../src/runtime/lifecycle.mjs';
-import {RuntimeOutcomeSettlement} from '../src/runtime/outcome.mjs';
+import {RuntimeSettlement} from '../src/runtime/settlement.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
 import {TaskRepository} from '../src/tasks/repository.mjs';
 import {TaskTransaction} from '../src/tasks/transaction.mjs';
@@ -25,15 +23,20 @@ import {ChangeNotifier} from '../src/tasks/change-notifier.mjs';
 import {
   normalizeTaskDetail,
   taskListView,
+  taskPageView,
   taskSummaryView,
   workspaceLabel,
 } from '../src/tasks/view.mjs';
-import {terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
+import {DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, pageOf, safeOffset, safePageLimit} from '../src/view/page.mjs';
+import {killOwnedRuntime, terminateVerifiedRuntime, verifyOwnedRuntime} from '../src/runtime/identity.mjs';
 import {AcceptanceService} from '../src/acceptance/service.mjs';
 import {ResearchBatchService} from '../src/research/service.mjs';
 import {TaskCommandModule} from '../src/tasks/command.mjs';
+import {TaskRework} from '../src/tasks/rework.mjs';
+import {pollUntilSettled} from '../src/tasks/wait-loop.mjs';
+import {validateOperation} from '../src/operations/catalogue.mjs';
+import {ConfigurationService} from '../src/config/service.mjs';
 
-const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/');
 
 // Default responses are communication-sized summaries. Full instructions and
 // results stay in task.json and the exported report; callers opt into pages of
@@ -41,11 +44,8 @@ const BUDGET_PLUGIN = path.join(HERE, 'budget-plugin.mjs').replaceAll('\\', '/')
 const SUMMARY_LIMIT = 120;
 const ERROR_LIMIT = 240;
 const PREVIEW_LIMIT = 400;
-const DEFAULT_PAGE_LIMIT = 2000;
-const MAX_PAGE_LIMIT = 4000;
 const DEFAULT_WAIT_SECONDS = 30;
 const MAX_WAIT_SECONDS = 86400;
-const ACTIVE_TASK = new Set(['created', 'running', 'stopping']);
 const STATUS_VIEWS = ['summary', 'result', 'history', 'usage', 'report', 'workspace', 'diff', 'log'];
 const isHighSurrogate = c => c >= 0xd800 && c <= 0xdbff;
 const isLowSurrogate = c => c >= 0xdc00 && c <= 0xdfff;
@@ -71,45 +71,6 @@ function clip(value, max) {
 }
 function summaryText(value) {
   return clip(oneLine(value), SUMMARY_LIMIT);
-}
-/**
- * Slice one page of a string. Offsets are UTF-16 code-unit offsets; an offset
- * inside a surrogate pair is rejected, and page boundaries never split one.
- * Pages never exceed `limit` in code units. `nextOffset === null` marks the
- * final page.
- */
-function pageOf(value, offset, limit) {
-  const text = typeof value === 'string' ? value : '';
-  const totalChars = text.length;
-  // An offset in the middle of a surrogate pair cannot start a valid page.
-  // Reject it explicitly instead of returning a lone low surrogate.
-  if (offset > 0 && offset < totalChars && isLowSurrogate(text.charCodeAt(offset)) && isHighSurrogate(text.charCodeAt(offset - 1))) {
-    throw new Error(`offset ${offset} splits a surrogate pair; use the previous nextOffset`);
-  }
-  const start = Math.min(offset, totalChars);
-  let end = Math.min(start + limit, totalChars);
-  if (end < totalChars && end > start) {
-    if (isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
-      // A pair at the boundary: shrink the page rather than emit a lone
-      // surrogate. With limit=1 there is no room to shrink, so fail clearly.
-      if (end - start === 1) throw new Error('limit is too small to advance over a surrogate pair; use limit >= 2');
-      end -= 1;
-    }
-  }
-  return {text: text.slice(start, end), offset: start, limit, totalChars,
-    nextOffset: end < totalChars ? end : null, complete: end >= totalChars};
-}
-function safeOffset(value, label = 'offset') {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${label} must be a non-negative safe integer`);
-  }
-  return value;
-}
-function safePageLimit(value, label = 'limit') {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > MAX_PAGE_LIMIT) {
-    throw new Error(`${label} must be a safe integer between 1 and ${MAX_PAGE_LIMIT}`);
-  }
-  return value;
 }
 /** Parse the optional status view and pagination args, rejecting bad types. */
 function statusQuery(a) {
@@ -140,18 +101,42 @@ function parseWaitSeconds(value) {
  * @returns the action dispatcher and lifecycle helpers.
  */
 export function createManager(options = {}) {
-  ensureDirs();
-  const repository = new TaskRepository({runsDir: RUNS, atomicJson});
+  // The assembly point decides the data root, configuration, and platform
+  // dependencies. Two managers built with different contexts share no state.
+  const context = options.context ?? runtimeContext();
+  // A test or embedded caller may pass its own configuration object and keep
+  // updating it; the shared default config is frozen and never mutated.
+  const config = options.config ?? context.config;
+  const {here: HERE, root: ROOT, runsDir: RUNS, reportsDir: REPORTS, runtimeDir: RUNTIME} = context;
+  const fileSystem = options.fs ?? fs;
+  const clock = options.clock ?? {now: () => new Date()};
+  const now = () => clock.now().toISOString();
+  // Two kill entry points with different evidence: a PID recovered from disk
+  // must prove its identity first; a handle this manager spawned already does.
+  const terminateRuntime = options.terminateRuntime ?? (record => terminateVerifiedRuntime(record));
+  const killOwned = options.killOwnedRuntime ?? (handle => killOwnedRuntime(handle));
+  ensureDataDirs(context);
+  // UsageModule keeps the limit object it was constructed with, so make sure a
+  // configuration without limits still yields one stable object.
+  const usageLimits = config.usageLimits && typeof config.usageLimits === 'object'
+    && !Array.isArray(config.usageLimits) ? config.usageLimits : {};
+  const repository = new TaskRepository({runsDir: RUNS, atomicJson, now, fs: fileSystem});
   const executionPolicy = new ExecutionPolicy({
     configuration: () => config.executionPolicy,
     baseDirectory: HERE,
   });
   // Reports, hashes, preview fingerprints, and human grants belong to the
-  // Acceptance module. The manager only injects the data directories.
-  const acceptance = new AcceptanceService({reportsDir: REPORTS, grantsDir: RUNTIME});
-  const eventSequences = new Map();
+  // Acceptance module. The manager only injects the data directories and the
+  // policy appendix, so no close path can write a report without it.
+  const acceptance = new AcceptanceService({
+    reportsDir: REPORTS,
+    grantsDir: RUNTIME,
+    now,
+    policySection: task => executionPolicy.reportSection(task),
+  });
   const taskChanges = new ChangeNotifier();
   const workspaceLeases = new WorkspaceLeaseManager({
+    git: options.git,
     defaultMode: config.workspaceMode ?? 'auto',
     worktreeContainerName: config.worktreeContainerName
       ?? config.worktreeParentName
@@ -163,31 +148,57 @@ export function createManager(options = {}) {
     reportsDir: REPORTS,
     atomicJson,
     createTask: input => createTask(input),
-    getTask: id => repository.peek(id) ?? null,
-    closeTask: id => stop(id, true),
+    // Research sees a narrow view: no runtime handle and no task record.
+    shardView: id => {
+      const task = repository.peek(id);
+      if (!task) return null;
+      const rec = workers.get(id);
+      return {
+        id: task.id,
+        status: task.status,
+        error: task.error ?? null,
+        resultText: latestResultText(task),
+        finishReason: task.rounds.at(-1)?.result?.finishReason ?? null,
+        idle: !rec || rec.phase === 'idle',
+      };
+    },
+    closeShard: async id => {
+      const rec = workers.get(id);
+      if (workers.live(id) && rec?.phase !== 'idle') return false;
+      await stop(id, true);
+      return true;
+    },
     cancelTask: id => stop(id, false),
     waitForTaskChanges: (ids, timeoutMs) => taskChanges.wait(ids, timeoutMs),
-    canCloseTask: id => {
-      const rec = workers.get(id);
-      return !rec || rec.phase === 'idle';
-    },
   });
   let shuttingDown = false;
 
+  const configurationService = options.configurationService ?? new ConfigurationService({
+    config,
+    configPath: context.configPath,
+    localConfigPath: context.localConfigPath,
+    localConfigSource: context.localConfigSource,
+  });
+
   const usageModule = new UsageModule({
-    configuration: config.usageLimits,
-    limitsForTask: task => effectiveLimits(task?.usageLimits, config.usageLimits),
+    configuration: {
+      limits: usageLimits,
+      providersDir: config.providersDir,
+      pricingFile: path.join(HERE, 'pricing.json'),
+    },
   });
 
   const directory = id => repository.directory(id);
   const get = id => repository.get(id);
-  const save = task => {
-    const saved = repository.save(task);
+  /** The only task write path: record and events commit together. */
+  const commit = (task, events = []) => {
+    const saved = repository.commit(task, events);
     taskChanges.touch(task.id);
     return saved;
   };
+  const save = task => commit(task);
   function fullView(t) {
-    return {...t, live: workers.has(t.id), cleanupAuthorized: acceptance.hasGrant(t.id),
+    return {...t, live: workers.live(t.id), cleanupAuthorized: acceptance.hasGrant(t.id),
       dataDirectory: directory(t.id), report: path.join(REPORTS, `${t.id}.md`),
       runtime: t.runtime ?? null};
   }
@@ -195,16 +206,13 @@ export function createManager(options = {}) {
     try { return resolveRoundBudget({inherited: t.maxTokens, fallback: config.maxTokens}); }
     catch { return null; }
   }
-  /** Reasoning effort is only sent to openai-chat providers that support it. */
+  /** The adapter declares whether it accepts reasoning effort. */
   function supportsEffort(provider) {
-    return provider?.type === 'openai-chat' && provider.supportsReasoning === true;
+    try { return capabilitiesFor(provider).effort; } catch { return false; }
   }
-  /** Built-in DSH SDK provider plus JSON provider files share one resolver. */
+  /** Built-in providers plus JSON provider files share one resolver. */
   function providerByName(name) {
-    if (name === 'dsh-sdk' || name === 'dsh') {
-      return {name: 'dsh-sdk', type: 'dsh-sdk', model: config.model};
-    }
-    return loadProvider(config.providersDir, name);
+    return resolveProvider(config.providersDir, name, {model: config.model});
   }
   function effectiveEffort(t) {
     if (!supportsEffort(t.provider)) return null;
@@ -224,62 +232,51 @@ export function createManager(options = {}) {
   function workspaceConflict(workspace, excludeId) {
     return workspaceLeases.conflictFor(workspace, [...repository.values()], {
       excludeId,
-      live: id => workers.has(id),
+      live: id => workers.live(id),
     });
   }
   /**
-   * Original rework refusals, checked before the cumulative usage limit. An
-   * override can bypass only the limit, never these conditions.
+   * One read-only decision for both the rework action and status summaries.
+   * Runtime facts are read through this closure, so a retained handle's
+   * unreworkable reason and the closing flag stay next to the handle itself.
    */
-  function baseReworkBlockedReason(t) {
-    if (shuttingDown) return 'Manager is shutting down; rework is refused';
-    const rec = workers.get(t.id);
-    // closed / accepted / running / stopping preconditions are the Acceptance
-    // module's policy; runtime, round, and workspace reasons stay here.
-    const acceptanceRefusal = acceptance.reworkRefusal(t, {closing: Boolean(rec?.closing)});
-    if (acceptanceRefusal) return acceptanceRefusal;
-    if (rec?.unreworkableReason) return rec.unreworkableReason;
-    if (t.rounds.length >= config.maxRounds) return `Maximum ${config.maxRounds} rounds reached; create a new task for further work`;
-    if (!rec && t.rounds.length > 0) {
-      return `Original runtime is gone; this DSH cannot resume sessionId ${t.sessionId} in a new runtime; create a new task for follow-up work`;
-    }
-    const conflict = workspaceConflict(t.workspace, t.id);
-    if (conflict) return `Workspace overlaps another task (${conflict.id}) with a live runtime; close it before reworking`;
-    return null;
-  }
-  /** Original refusals first; a blocked cumulative limit is the last reason. */
-  function reworkBlockedReason(t, usage = null) {
-    const base = baseReworkBlockedReason(t);
-    if (base) return base;
-    if (usage?.limitState === 'blocked') return usageModule.blockedReason(usage);
-    return null;
-  }
+  const rework = new TaskRework({
+    usage: usageModule,
+    maxRounds: () => config.maxRounds,
+    isShuttingDown: () => shuttingDown,
+    runtimeFacts: t => {
+      const rec = workers.get(t.id);
+      return {
+        closing: Boolean(rec?.closing),
+        live: workers.live(t.id),
+        unreworkableReason: rec?.unreworkableReason ?? null,
+      };
+    },
+    workspaceConflict,
+    directory: id => directory(id),
+    providerSupportsEffort: supportsEffort,
+    resolveBudget: resolveRoundBudget,
+    resolveEffort: resolveRoundEffort,
+    defaultEffort: () => config.defaultEffort ?? DEFAULT_EFFORT,
+  });
   /** Never throws; an unavailable usage source becomes an unavailable limit state. */
   function usageSnapshot(t, options = {}) {
     return usageModule.snapshot(t, directory(t.id), options);
   }
   const commandModule = new TaskCommandModule({
     limitsForRequest: (task, value) => usageModule.limitsForRequest(task, value),
-    parseBudget: parseOptionalMaxTokens,
-    parseEffort: parseOptionalEffort,
-    providerSupportsEffort: supportsEffort,
-    resolveBudget: resolveRoundBudget,
-    resolveEffort: resolveRoundEffort,
-    defaultEffort: () => config.defaultEffort ?? DEFAULT_EFFORT,
-    baseBlocked: task => baseReworkBlockedReason(task),
     canStart: () => shuttingDown ? 'Manager is shutting down' : null,
     preflight: ({request, taskId, validated}) => preflightCreate(request, taskId, validated),
-    now: () => new Date().toISOString(),
   });
   /** Resolve and validate a workspace before any task directory is created. */
   function resolveWorkspace(value) {
     if (typeof value !== 'string' || !value.trim()) throw new Error('Workspace path required');
     const resolved = path.resolve(value);
     let real;
-    try { real = fs.realpathSync(resolved); }
+    try { real = fileSystem.realpathSync(resolved); }
     catch { throw new Error(`Workspace does not exist or is inaccessible: ${value}`); }
     let stat;
-    try { stat = fs.statSync(real); }
+    try { stat = fileSystem.statSync(real); }
     catch { throw new Error(`Workspace is inaccessible: ${value}`); }
     if (!stat.isDirectory()) throw new Error('Workspace must be a directory');
     if (isDriveRoot(resolved) || isDriveRoot(real)) throw new Error('Workspace must not be a drive root');
@@ -358,11 +355,13 @@ export function createManager(options = {}) {
    * process exit is confirmed, and the error says so explicitly.
    */
   function failStart(id, error) {
-    const runtimeUnconfirmed = workers.has(id);
+    // "May still be running" means the handle is retained and no exit event
+    // has been observed; an exited-but-unforgotten handle is not a live risk.
+    const runtimeUnconfirmed = workers.held(id) && !runtime.hasExited(id);
     const message = `Task ${id} failed to start: ${error.message}${runtimeUnconfirmed ? '; runtime exit not confirmed (process may still be running)' : ''}`;
     const cur = repository.peek(id);
     if (cur) {
-      const outcome = outcomeSettlement.startFailed({
+      const outcome = settlement.startFailed({
         task: cur,
         error: error.message,
         message,
@@ -382,9 +381,10 @@ export function createManager(options = {}) {
    */
   function persistFailure(outcome) {
     let persistError = null;
-    try { event(outcome.task, outcome.event); } catch (error) { persistError = error; }
-    if (!persistError) {
-      try { save(outcome.task); } catch (error) { persistError = error; }
+    try {
+      commit(outcome.task, outcome.event ? [outcome.event] : []);
+    } catch (error) {
+      persistError = error;
     }
     if (persistError) {
       try {
@@ -413,7 +413,7 @@ export function createManager(options = {}) {
     });
     item.maxTokens = effectiveMaxTokens(t);
     item.cleanupAuthorized = acceptance.hasGrant(t.id);
-    item.live = workers.has(t.id);
+    item.live = workers.live(t.id);
     if (t.error && error.truncated) item.errorTruncated = true;
     if (withPaths) {
       const sourceWorkspace = t.sourceWorkspace ?? t.workspaceLease?.sourceWorkspace ?? t.workspace;
@@ -444,17 +444,17 @@ export function createManager(options = {}) {
   }
   /** Default status: bounded progress plus a short preview, never full history. */
   function statusSummary(t) {
-    // One usage computation supplies both the compact item and status.usage.
-    const snapshot = usageSnapshot(t);
-    const base = compactTask(t, true, snapshot.listUsage);
     const last = t.rounds.at(-1);
+    // One usage computation supplies both the compact item and status.usage.
+    // The last round's policy notice is a status warning, not a list flag.
+    const snapshot = usageSnapshot(t, {
+      extraWarnings: last?.policy?.warning ? [last.policy.warning] : [],
+    });
+    const base = compactTask(t, true, snapshot.listUsage);
     const resultText = latestResultText(t);
     const preview = clip(resultText, PREVIEW_LIMIT);
     const statusUsage = snapshot.statusUsage;
-    if (last?.policy?.warning) {
-      statusUsage.warnings = [...new Set([...(statusUsage.warnings ?? []), last.policy.warning])];
-    }
-    const reworkBlocked = reworkBlockedReason(t, statusUsage);
+    const reworkBlocked = rework.blockedReason(t, statusUsage);
     const summary = taskSummaryView(t, {
       listView: base,
       usageRounds: snapshot.usageRounds,
@@ -473,43 +473,32 @@ export function createManager(options = {}) {
   /** Hold one HTTP/MCP call until the task stops running or the wait expires. */
   async function waitForTask(a) {
     const timeoutSeconds = parseWaitSeconds(a.timeoutSeconds);
-    const startedAt = Date.now();
-    const timeoutMs = timeoutSeconds * 1000;
-    for (;;) {
-      const task = get(a.id);
-      if (!ACTIVE_TASK.has(task.status)) {
-        return {
-          ...statusSummary(task),
-          wait: {timedOut: false, timeoutSeconds, waitedMs: Date.now() - startedAt},
-        };
-      }
-      const remaining = timeoutMs - (Date.now() - startedAt);
-      if (remaining <= 0) {
-        return {
-          ...statusSummary(task),
-          wait: {timedOut: true, timeoutSeconds, waitedMs: Date.now() - startedAt},
-        };
-      }
-      await taskChanges.wait([task.id], remaining);
-    }
+    const wait = await pollUntilSettled({
+      timeoutSeconds,
+      isSettled: () => !ACTIVE_TASK_STATUSES.has(get(a.id).status),
+      waitForChange: remaining => taskChanges.wait([a.id], remaining),
+    });
+    return {...statusSummary(get(a.id)), wait};
   }
   /** Latest-round raw result, one paginated page at a time. */
   function resultPage(t, offset, limit) {
     const last = t.rounds.at(-1);
     const text = latestResultText(t);
-    return {id: t.id, view: 'result', round: last?.number ?? null,
-      finishReason: last?.result?.finishReason ?? null, ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'result', pageOf(text, offset, limit), {
+      round: last?.number ?? null,
+      finishReason: last?.result?.finishReason ?? null,
+    });
   }
   /** Complete persisted record as reconstructable JSON text, one page at a time. */
   function historyPage(t, offset, limit) {
     const text = JSON.stringify(fullView(t), null, 2);
-    return {id: t.id, view: 'history', ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'history', pageOf(text, offset, limit));
   }
   /** Usage metrics and per-request detail as reconstructable JSON text. */
   function usagePage(t, offset, limit) {
     const payload = usageModule.view(t, directory(t.id));
     const text = JSON.stringify(payload, null, 2);
-    return {id: t.id, view: 'usage', ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'usage', pageOf(text, offset, limit));
   }
   function workspacePage(t, offset, limit) {
     const inspected = workspaceLeases.inspect(t.workspaceLease, t.workspace);
@@ -526,7 +515,7 @@ export function createManager(options = {}) {
     const payload = {
       id: t.id,
       view: 'workspace',
-      live: workers.has(t.id),
+      live: workers.live(t.id),
       executionWorkspace: t.workspace,
       sourceWorkspace: t.sourceWorkspace ?? inspected.sourceWorkspace,
       workspaceLease: t.workspaceLease ?? null,
@@ -534,114 +523,75 @@ export function createManager(options = {}) {
       runtime,
     };
     const text = JSON.stringify(payload, null, 2);
-    return {id: t.id, view: 'workspace', ...pageOf(text, offset, limit)};
+    return taskPageView(t.id, 'workspace', pageOf(text, offset, limit));
   }
   function diffPage(t, offset, limit) {
     const inspected = workspaceLeases.inspect(t.workspaceLease, t.workspace);
-    return {
-      id: t.id,
-      view: 'diff',
+    return taskPageView(t.id, 'diff', pageOf(inspected.diff ?? '', offset, limit), {
       branch: inspected.branch ?? null,
       baseCommit: inspected.baseCommit ?? null,
       status: inspected.status ?? '',
-      ...pageOf(inspected.diff ?? '', offset, limit),
-    };
+    });
   }
   function logPage(t, offset, limit) {
     const file = path.join(directory(t.id), 'runtime.log');
     let content = '';
     try {
-      const bytes = fs.statSync(file).size;
+      const bytes = fileSystem.statSync(file).size;
       const start = Math.max(0, bytes - 1024 * 1024);
-      const fd = fs.openSync(file, 'r');
+      const fd = fileSystem.openSync(file, 'r');
       try {
         const buffer = Buffer.alloc(bytes - start);
-        fs.readSync(fd, buffer, 0, buffer.length, start);
+        fileSystem.readSync(fd, buffer, 0, buffer.length, start);
         content = buffer.toString('utf8');
       } finally {
-        fs.closeSync(fd);
+        fileSystem.closeSync(fd);
       }
     } catch (error) {
       if (error.code !== 'ENOENT') content = `(runtime log unavailable: ${shortMessage(error)})`;
     }
-    return {id: t.id, view: 'log', path: file, ...pageOf(content, offset, limit)};
+    return taskPageView(t.id, 'log', pageOf(content, offset, limit), {path: file});
   }
   function reportPage(t, offset, limit) {
-    const content = acceptance.content(t, {policySection: executionPolicy.reportSection(t)});
-    return {id: t.id, view: 'report', ...pageOf(content, offset, limit)};
-  }
-  function event(t, data) {
-    const persisted = repository.peek(t.id);
-    const previous = eventSequences.get(t.id);
-    const baseline = Number.isSafeInteger(previous)
-      ? previous
-      : persisted?.eventSequence ?? t.eventSequence ?? 0;
-    const sequence = baseline + 1;
-    eventSequences.set(t.id, sequence);
-    t.eventSequence = sequence;
-    const currentRoundId = t.rounds?.at(-1)?.roundId;
-    const record = {
-      at: new Date().toISOString(),
-      sequence,
-      ...(currentRoundId && data.roundId === undefined ? {roundId: currentRoundId} : {}),
-      ...data,
-    };
-    fs.appendFileSync(path.join(directory(t.id), 'events.jsonl'), `${JSON.stringify(record)}\n`);
-    t.lastEventSequence = sequence;
-    return record;
+    const content = acceptance.content(t);
+    return taskPageView(t.id, 'report', pageOf(content, offset, limit));
   }
   function restoreTasks() {
-    for (const t of repository.restore()) {
-      const name = t.id;
-      eventSequences.set(name, t.eventSequence);
+    for (const restored of repository.restore()) {
+      const name = restored.id;
+      let t = restored;
       if (['running', 'stopping'].includes(t.status)) {
         let runtime = t.runtime;
         if (!runtime) {
-          try { runtime = JSON.parse(fs.readFileSync(path.join(directory(name), 'runtime.json'), 'utf8')); } catch {}
+          try { runtime = JSON.parse(fileSystem.readFileSync(path.join(directory(name), 'runtime.json'), 'utf8')); } catch {}
         }
         if (runtime) {
           const verification = verifyOwnedRuntime(runtime);
-          const outcome = runtimeLifecycle.recover({task: t, runtime, identity: verification});
+          const outcome = settlement.recover({task: t, runtime, identity: verification});
           if (outcome.decision !== 'not-recoverable') {
             runtime = outcome.runtime;
-            Object.assign(t, outcome.task);
+            t = outcome.task;
             try { atomicJson(path.join(directory(name), 'runtime.json'), runtime); } catch {}
           }
         } else {
-          t.status = 'failed';
-          t.error = 'Manager restarted; the old runtime is no longer reusable, so inspect the workspace and create a new task for follow-up work';
+          t = {
+            ...t,
+            status: 'failed',
+            error: 'Manager restarted; the old runtime is no longer reusable, so inspect the workspace and create a new task for follow-up work',
+          };
         }
       }
-      save(t);
+      commit(t);
       acceptance.restoreGrant(t.id);
     }
     research.restore();
-  }
-  function patchFor(t) {
-    // No credential copying. Runtime reads the configured credential store.
-    // The task-budget plugin is mounted by absolute path and reads only the
-    // task's own budget file; it does not touch the DSH installation.
-    const patch = [
-      {id: 'credentials', config: {path: path.resolve(config.credentialsFile), watch: false}},
-      {id: 'session-log-deepseek', config: {enabled: false}},
-      {id: 'session-telemetry-otel', disabled: true},
-      {id: 'session-title-llm', disabled: true},
-      {id: 'spill-local', config: {root: path.join(directory(t.id), 'tmp', 'spill')}},
-      {id: 'sdk-jsonrpc-server', config: {maxTokensAsSuccess: false}},
-      // A new plugin row must be inserted; a flat {id} row would be an override
-      // targeting an existing entry and would never mount.
-      {insert: [
-        {id: 'task-budget', name: BUDGET_PLUGIN, config: {budgetFile: budgetFileFor(directory(t.id)).replaceAll('\\', '/')}},
-      ]},
-    ];
-    fs.writeFileSync(t.patch, JSON.stringify(patch, null, 2)); // JSON is a valid YAML patch list.
   }
   function defaultForkWorker(t, runtime = {}) {
     return fork(path.join(HERE, 'worker.mjs'), [
       `--waxwing-owner=${runtime.ownerMarker}`,
       `--waxwing-task=${t.id}`,
     ], {
-      execPath: config.node, cwd: HERE, windowsHide: true,
+      execPath: context.node, cwd: HERE, windowsHide: true,
       env: {
         ...cleanEnvironment(path.join(directory(t.id), 'tmp')),
         WAXWING_OWNER_MARKER: runtime.ownerMarker,
@@ -664,11 +614,10 @@ export function createManager(options = {}) {
       phase: rec.phase,
       health: rec.health,
       lastHeartbeatAt: rec.lastHeartbeatAt ? new Date(rec.lastHeartbeatAt).toISOString() : null,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now(),
       ...extra,
     };
     atomicJson(runtimeFile(t.id), record);
-    t.runtime = record;
     return record;
   }
   /**
@@ -677,18 +626,27 @@ export function createManager(options = {}) {
    * process fork, and the Provider-fallback handoff that only fires after a
    * release. No filesystem layout, Git, acceptance, or usage logic lives here.
    */
+  /**
+   * One settlement rule for every runtime fact: the task status, the event,
+   * the lease conclusion, and the handle decision. The manager only persists
+   * and dispatches what it returns.
+   */
+  const settlement = new RuntimeSettlement({
+    terminate: record => terminateRuntime(record),
+    fallbackProvider: name => providerByName(name),
+    defaultModel: () => config.model,
+    supportsEffort: provider => supportsEffort(provider),
+  });
   const runtime = new Runtime({
     spawn: ({task, ownerMarker}) => forkWorker(task, {ownerMarker}),
     latest: id => repository.peek(id) ?? null,
-    event: ({task, payload}) => event(task, payload),
-    save: ({task}) => save(task),
-    transition: ({task, action}) => transition(task, action),
+    commit: ({task, payload}) => commit(task, payload ? [payload] : []),
     persist: ({task, rec, extra}) => persistRuntimeRecord(task, rec, extra),
     log: ({task, rec, chunk}) => {
       if (rec.logBytes > 1024 * 1024) return;
       rec.logBytes += chunk.length;
       // Managed credentials are never read by this manager or passed in arguments.
-      fs.appendFileSync(path.join(directory(task.id), 'runtime.log'), chunk.toString().replace(/sk-[\w-]+/g, '[redacted]'));
+      fileSystem.appendFileSync(path.join(directory(task.id), 'runtime.log'), chunk.toString().replace(/sk-[\w-]+/g, '[redacted]'));
     },
     untrusted: ({id, detail}) => markUntrusted(id, detail),
     terminal: ({task, rec, message}) => settleTerminal(task, rec, message),
@@ -697,81 +655,61 @@ export function createManager(options = {}) {
     released: ({fallback}) => handoffReleased(fallback),
     ackTimeout: ({task, rec, roundId, timeoutMs}) => settleAckTimeout(task, rec, roundId, timeoutMs),
     roundTimeout: ({rec, timeoutMs}) => stopAfterRoundTimeout(rec, timeoutMs),
-  });
-  const runtimeLifecycle = new RuntimeLifecycle({
-    terminate: record => terminateVerifiedRuntime(record),
-  });
-  const outcomeSettlement = new RuntimeOutcomeSettlement({
-    transition: (task, action) => transition(task, action),
-    fallbackProvider: name => providerByName(name),
-    defaultModel: () => config.model,
-    supportsEffort: provider => supportsEffort(provider),
-  });
+  }, {settlement});
   /**
-   * Liveness facade. A live handle keeps the workspace locked, so every caller
-   * that used to read the raw handles map still reads the same truth here.
+   * Liveness facade. Two questions must stay distinct: `live` means the owned
+   * process has not been observed to exit, so it may still write files; `held`
+   * means the handle is retained until `forget`, which is what a failed final
+   * save needs in order to retry.
    */
   const workers = {
-    has: id => runtime.has(id),
+    live: id => runtime.isLive(id),
+    held: id => runtime.has(id),
     get: id => runtime.get(id),
-    keys: () => runtime.ids(),
+    liveKeys: () => runtime.liveIds(),
   };
   const tasks = new TaskTransaction({
     runtime,
     repository,
     save,
-    event: (task, payload) => event(task, payload),
+    event: (task, payload) => commit(task, [payload]),
+    commit: (task, events) => commit(task, events),
     workspace: workspaceLeases,
-    acceptance: {
-      revoke: task => acceptance.revoke(task),
-      report: task => acceptance.exportReport(task, {policySection: executionPolicy.reportSection(task)}),
-    },
+    acceptance,
     gracefulExitTimeoutMs: DEFAULT_EXIT_TIMEOUT_MS,
     forceExitTimeoutMs: FORCE_EXIT_TIMEOUT_MS,
     untrusted: (id, detail) => markUntrusted(id, detail),
-    terminate: async ({rec}) => {
-      if (process.platform === 'win32') {
-        const kill = spawn('taskkill', ['/PID', String(rec.w.pid), '/T', '/F'], {
-          windowsHide: true,
-          stdio: 'ignore',
-        });
-        await once(kill, 'exit');
-      } else {
-        rec.w.kill('SIGKILL');
-      }
-    },
-    runtimeLifecycle,
+    // A forced exit always targets a handle this manager spawned, so it kills
+    // through that handle; exit is still confirmed by the Runtime afterwards.
+    terminate: async ({rec}) => killOwned(rec.w),
+    settlement,
   });
   /** Persist a terminal result or error, applying first-round Provider fallback. */
   function settleTerminal(task, rec, message) {
     let fallback = null;
     try {
-      fallback = outcomeSettlement.firstRoundFailure(task, message, config.fallbackProvider);
+      fallback = settlement.firstRoundFailure(task, message, config.fallbackProvider);
     } catch (error) {
-      event(task, {kind: 'provider_fallback_failed', error: error.message});
+      commit(task, [{kind: 'provider_fallback_failed', error: error.message}]);
     }
     if (fallback) {
-      event(fallback.task, fallback.event);
-      save(fallback.task);
+      commit(fallback.task, [fallback.event]);
       runtime.deferFallback(fallback.fallback.taskId, fallback.fallback);
       return;
     }
-    const outcome = outcomeSettlement.terminal({task, message});
-    event(outcome.task, outcome.event);
-    save(outcome.task);
+    const outcome = settlement.terminal({task, message});
+    commit(outcome.task, [outcome.event]);
   }
   /** A release without a result or error is a protocol violation, not a success. */
   function settleMissingTerminal(task, rec, message) {
-    const outcome = outcomeSettlement.missingTerminal({task, message});
-    event(outcome.task, outcome.event);
-    save(outcome.task);
+    const outcome = settlement.missingTerminal({task, message});
+    commit(outcome.task, [outcome.event]);
   }
   /** A busy worker means its previous round never released; fail explicitly. */
   function settleWorkerBusy(task, rec, message) {
-    const outcome = outcomeSettlement.workerBusy({task, message});
-    event(outcome.task, outcome.event);
-    runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
-    save(outcome.task);
+    const outcome = settlement.workerBusy({task, message});
+    const saved = commit(outcome.task, [outcome.event]);
+    runtime.reportHealth(saved, rec, outcome.health.health, outcome.health.detail);
   }
   /** Deferred Provider fallback starts only after the failed round released. */
   function handoffReleased(fallback) {
@@ -781,7 +719,7 @@ export function createManager(options = {}) {
     void executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort).catch(error => {
       const latest = repository.peek(fallback.taskId);
       if (latest && latest.status !== 'failed') {
-        persistFailure(outcomeSettlement.fallbackFailed({
+        persistFailure(settlement.fallbackFailed({
           task: latest,
           providerName: fallback.providerName,
           message: `Fallback to ${fallback.providerName} also failed: ${error.message}`,
@@ -791,10 +729,9 @@ export function createManager(options = {}) {
   }
   /** An unacknowledged round is untrusted, but its process is deliberately kept. */
   function settleAckTimeout(task, rec, roundId, timeoutMs) {
-    const outcome = outcomeSettlement.ackTimeout({task, roundId, timeoutMs});
-    runtime.reportHealth(outcome.task, rec, outcome.health.health, outcome.health.detail);
-    event(outcome.task, outcome.event);
-    try { save(outcome.task); } catch {}
+    const outcome = settlement.ackTimeout({task, roundId, timeoutMs});
+    const saved = commit(outcome.task, [outcome.event]);
+    runtime.reportHealth(saved, rec, outcome.health.health, outcome.health.detail);
   }
   /** A round deadline requests a stop; a failed stop must not look like a timeout. */
   function stopAfterRoundTimeout(rec, timeoutMs) {
@@ -804,7 +741,7 @@ export function createManager(options = {}) {
       // worker handle in place, so the workspace stays locked.
       const cur = repository.peek(id);
       if (cur && cur.status === 'running') {
-        persistFailure(outcomeSettlement.stopFailed({
+        persistFailure(settlement.stopFailed({
           task: cur,
           timeoutMs,
           message: `Task ${id} timed out, but stopping it failed: ${error.message}`,
@@ -818,7 +755,7 @@ export function createManager(options = {}) {
    * heartbeat, and round timers, and the release gate. This function owns the
    * task record, the grant revocations, and the startup-failure bookkeeping.
    */
-  async function executeRun(t, userPrompt, maxTokens, effort = null) {
+  async function executeRun(t, userPrompt, maxTokens, effort = null, runOptions = {}) {
     // The policy is read at round start; the recorded prompt stays the raw user
     // instruction and each round keeps the version/hash actually applied.
     const policy = executionPolicy.round();
@@ -828,6 +765,8 @@ export function createManager(options = {}) {
       maxTokens,
       effort,
       policy,
+      configure: runOptions.configure,
+      events: runOptions.events,
     });
     const {task: next, roundId} = prepared;
     try {
@@ -836,8 +775,8 @@ export function createManager(options = {}) {
         prompt: effectivePrompt,
         maxTokens,
         effort,
-        // Only pass budgetFile for DSH SDK providers.
-        budgetFile: next.provider?.type === 'dsh-sdk' ? budgetFileFor(directory(next.id)) : null,
+        // Only a provider that declares a budget patch gets a per-round file.
+        budgetFile: capabilitiesFor(next.provider).budgetPatch ? budgetFileFor(directory(next.id)) : null,
         timeouts: roundTimeouts(config),
       });
     } catch (error) {
@@ -854,7 +793,7 @@ export function createManager(options = {}) {
   }
   /** Preview/deletion preconditions and the fingerprint live in the module. */
   function deletionPreview(t) {
-    return acceptance.preview(t, {directory: directory(t.id), live: workers.has(t.id)});
+    return acceptance.preview(t, {directory: directory(t.id), live: workers.live(t.id)});
   }
   async function createTask(a = {}) {
     // All request, budget, workspace, and occupancy checks happen before any
@@ -868,17 +807,17 @@ export function createManager(options = {}) {
       request: a,
       directory: dir,
       makeDirectories: () => {
-        fs.mkdirSync(dir);
-        fs.mkdirSync(path.join(dir, 'home'));
-        fs.mkdirSync(path.join(dir, 'tmp'));
+        fileSystem.mkdirSync(dir);
+        fileSystem.mkdirSync(path.join(dir, 'home'));
+        fileSystem.mkdirSync(path.join(dir, 'tmp'));
       },
-      removeDirectory: () => fs.rmSync(dir, {recursive: true, force: true}),
+      removeDirectory: () => fileSystem.rmSync(dir, {recursive: true, force: true}),
       preflight: {
         ...preflight,
         workspaceMode: a.workspaceMode ?? config.workspaceMode ?? 'auto',
         conflictFor: workspace => {
           const conflict = workspaceConflict(workspace);
-          return conflict ? {...conflict, live: workers.has(conflict.id)} : null;
+          return conflict ? {...conflict, live: workers.live(conflict.id)} : null;
         },
       },
       buildRecord: ({lease}) => {
@@ -899,8 +838,8 @@ export function createManager(options = {}) {
           status: 'created',
           rounds: [],
           eventSequence: 0,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          createdAt: now(),
+          updatedAt: now(),
           acceptance: null,
           effort: preflight.effort,
           usageLimits: preflight.usageLimits,
@@ -910,119 +849,141 @@ export function createManager(options = {}) {
           t.batchId = a.batchId;
           t.shardId = a.shardId;
         }
-        // Only write DSH runtime patch for DSH SDK providers.
-        if (preflight.provider.type === 'dsh-sdk') patchFor(t);
+        // The adapter writes whatever files its task needs before round one.
+        prepareTask(preflight.provider, t, {directory: dir, credentialsFile: config.credentialsFile});
         return t;
       },
     });
     return executeRun(created.task, preflight.prompt, preflight.maxTokens, preflight.effort);
   }
-  async function action(name, a = {}) {
-    if (!a || typeof a !== 'object' || Array.isArray(a)) throw new Error('Arguments must be an object');
-    switch (name) {
-      case 'list': return [...repository.values()].map(t => {
+  // Handler table keyed by the operation catalogue. `action` owns the shared
+  // validation; a new operation adds its catalogue entry and one handler here.
+  const handlers = {
+    list() {
+      return [...repository.values()].map(t => {
         const snapshot = usageSnapshot(t);
         const item = compactTask(t, false, snapshot.listUsage);
-        if (snapshot.statusUsage.limitState === 'blocked') item.limitBlocked = true;
-        else if (snapshot.statusUsage.limitState === 'warning' ||
-          snapshot.statusUsage.limitState === 'unavailable') item.limitWarning = true;
+        const flags = usageModule.listFlags(snapshot);
+        if (flags.limitBlocked) item.limitBlocked = true;
+        else if (flags.limitWarning) item.limitWarning = true;
         return item;
       });
-      case 'status': {
-        const t = get(a.id), q = statusQuery(a);
-        if (q.view === 'summary') return statusSummary(t);
-        if (q.view === 'result') return resultPage(t, q.offset, q.limit);
-        if (q.view === 'usage') return usagePage(t, q.offset, q.limit);
-        if (q.view === 'report') return reportPage(t, q.offset, q.limit);
-        if (q.view === 'workspace') return workspacePage(t, q.offset, q.limit);
-        if (q.view === 'diff') return diffPage(t, q.offset, q.limit);
-        if (q.view === 'log') return logPage(t, q.offset, q.limit);
-        return historyPage(t, q.offset, q.limit);
-      }
-      case 'wait': return waitForTask(a);
-      case 'research_start': return research.start(a);
-      case 'research_status': return research.status(a.id);
-      case 'research_wait': return research.wait(a.id, {timeoutSeconds: a.timeoutSeconds});
-      case 'research_collect': return research.collect(a.id, {offset: a.offset, limit: a.limit});
-      case 'research_cancel': return research.cancel(a.id);
-      case 'create': return createTask(a);
-      case 'rework': {
-        const t = get(a.id);
-        const inputs = usageModule.reworkInputs(t, a);
-        const validated = commandModule.validateRework(t, a, {usageDecision: inputs});
-        const decision = usageModule.decideRework(t, directory(t.id), a, {
-          inputs,
-          baseBlockedReason: () => baseReworkBlockedReason(t),
-        });
-        const command = commandModule.rework(t, a, {
-          usageDecision: {...inputs, decision: decision.decision},
-          validated,
-        });
-        usageModule.applyRework(t, decision);
-        if (decision.event) {
-          const payload = {...decision.event};
-          delete payload.overrideAt;
-          event(t, payload);
-        }
-        return executeRun(t, command.prompt, command.maxTokens, command.effort);
-      }
-      case 'cleanup_worktree': {
-        const t = get(a.id);
-        const result = workspaceLeases.release({task: t, live: workers.has(t.id)});
-        event(t, {kind: 'worktree_cleaned', ...result});
-        save(t);
-        return {id: t.id, ...result};
-      }
-      case 'cancel': return stop(a.id, false);
-      case 'close': return stop(a.id, true);
-      case 'accept': {
-        // Lifecycle first, then evidence: an illegal status must still report
-        // "Cannot accept task in ..." exactly as before.
-        const t = transition(get(a.id), 'accept');
-        const accepted = acceptance.acceptAndSave(t, {
-          evidence: a.evidence,
-          policySection: executionPolicy.reportSection(t),
-          save,
-        });
-        event(accepted, {kind: 'accepted', evidence: a.evidence});
-        return statusSummary(accepted);
-      }
-      case 'export': {
-        const t = get(a.id);
-        return acceptance.exportAndSave(t, {policySection: executionPolicy.reportSection(t), save});
-      }
-      case 'preview_delete': return deletionPreview(get(a.id));
-      case 'grant_delete': {
-        // This endpoint is intentionally omitted from the MCP tool catalogue.
-        // The trusted delegating party must obtain explicit human permission; the local OS account is the prototype trust boundary.
-        // The module requires the complete, exact task ID before it previews.
-        acceptance.assertConfirmation(a.id, a.confirmation);
-        const t = get(a.id);
-        return acceptance.grant(t, {
-          directory: directory(t.id),
-          live: workers.has(t.id),
-          confirmation: a.confirmation,
-        });
-      }
-      case 'delete': {
-        // Preview, archived-report hash, grant scope, and fingerprint equality
-        // are one decision inside the module; the manager only reaps records.
-        const t = get(a.id);
-        return acceptance.removeTaskAndForget(t, {
-          directory: directory(t.id),
-          live: workers.has(t.id),
-          forget: id => {
-            repository.delete(id);
-            eventSequences.delete(id);
-          },
-        });
-      }
-      default: throw new Error(`Unknown action: ${name}`);
-    }
+    },
+    status(a) {
+      const t = get(a.id), q = statusQuery(a);
+      if (q.view === 'summary') return statusSummary(t);
+      if (q.view === 'result') return resultPage(t, q.offset, q.limit);
+      if (q.view === 'usage') return usagePage(t, q.offset, q.limit);
+      if (q.view === 'report') return reportPage(t, q.offset, q.limit);
+      if (q.view === 'workspace') return workspacePage(t, q.offset, q.limit);
+      if (q.view === 'diff') return diffPage(t, q.offset, q.limit);
+      if (q.view === 'log') return logPage(t, q.offset, q.limit);
+      return historyPage(t, q.offset, q.limit);
+    },
+    wait: a => waitForTask(a),
+    research_start: a => research.start(a),
+    research_status: a => research.status(a.id),
+    research_wait: a => research.wait(a.id, {timeoutSeconds: a.timeoutSeconds}),
+    research_collect: a => research.collect(a.id, {offset: a.offset, limit: a.limit}),
+    research_cancel: a => research.cancel(a.id),
+    config_info: () => configurationService.info(),
+    providers_list: () => configurationService.providers(),
+    provider_validate: a => configurationService.validate(a.config),
+    provider_save: a => configurationService.saveProvider(a.config),
+    provider_delete: a => configurationService.deleteProvider(a.name),
+    settings_get: () => configurationService.settings(),
+    settings_save(a) {
+      const applied = configurationService.saveSettings(a);
+      // The manager read its configuration at startup. Report the restart
+      // explicitly instead of running with limits the user did not see, and
+      // let the desktop show the notice. Provider file changes are already
+      // live because provider resolution reads the directory per task.
+      return {
+        saved: true,
+        restartRequired: true,
+        localConfigPath: applied.localConfigPath,
+        settings: {
+          defaultProvider: applied.defaultProvider,
+          fallbackProvider: applied.fallbackProvider,
+          usageLimits: applied.usageLimits,
+        },
+      };
+    },
+    create: a => createTask(a),
+    rework(a) {
+      const t = get(a.id);
+      // One read-only decision supplies the prompt, limits, and override event.
+      // The record change is applied only inside prepareRun's commit, so a gate
+      // failure leaves both task.json and events.jsonl unchanged.
+      const decision = rework.decide(t, a);
+      if (!decision.allowed) throw new Error(decision.reason);
+      return executeRun(t, decision.prompt, decision.maxTokens, decision.effort, {
+        configure: value => Object.assign(value, decision.record),
+        events: decision.event ? [decision.event] : [],
+      });
+    },
+    cleanup_worktree(a) {
+      const t = get(a.id);
+      const {lease, ...result} = workspaceLeases.release({task: t, live: workers.live(t.id)});
+      commit({...t, workspaceLease: lease ?? t.workspaceLease}, [
+        {kind: 'worktree_cleaned', ...result},
+      ]);
+      return {id: t.id, ...result};
+    },
+    cancel: a => stop(a.id, false),
+    close: a => stop(a.id, true),
+    accept(a) {
+      // Lifecycle first, then evidence: an illegal status must still report
+      // "Cannot accept task in ..." exactly as before.
+      const t = transition(get(a.id), 'accept');
+      const accepted = acceptance.acceptAndSave(t, {
+        evidence: a.evidence,
+        save,
+      });
+      const saved = commit(accepted, [{kind: 'accepted', evidence: a.evidence}]);
+      return statusSummary(saved);
+    },
+    export(a) {
+      const t = get(a.id);
+      return acceptance.exportAndSave(t, {save});
+    },
+    preview_delete: a => deletionPreview(get(a.id)),
+    grant_delete(a) {
+      // This endpoint is intentionally omitted from the MCP tool catalogue.
+      // The trusted delegating party must obtain explicit human permission; the local OS account is the prototype trust boundary.
+      // The module requires the complete, exact task ID before it previews.
+      acceptance.assertConfirmation(a.id, a.confirmation);
+      const t = get(a.id);
+      return acceptance.grant(t, {
+        directory: directory(t.id),
+        live: workers.live(t.id),
+        confirmation: a.confirmation,
+      });
+    },
+    delete(a) {
+      // Preview, archived-report hash, grant scope, and fingerprint equality
+      // are one decision inside the module; the manager only reaps records.
+      const t = get(a.id);
+      return acceptance.removeTaskAndForget(t, {
+        directory: directory(t.id),
+        live: workers.live(t.id),
+        forget: id => {
+          repository.delete(id);
+        },
+      });
+    },
+  };
+  async function action(name, a = {}) {
+    // Shape, unknown fields, bounds, and operation-specific rules come from the
+    // shared catalogue; handlers only add ordering and domain policy.
+    a = validateOperation(name, a);
+    const handler = handlers[name];
+    if (!handler) throw new Error(`Unknown action: ${name}`);
+    return handler(a);
   }
   async function shutdown() {
     if (shuttingDown) return; shuttingDown = true;
-    await Promise.allSettled([...workers.keys()].map(id => stop(id, true)));
+    await Promise.allSettled([...workers.liveKeys()].map(id => stop(id, true)));
   }
   return {action, restore: restoreTasks, shutdown};
 }

@@ -1,7 +1,9 @@
+// UsageModule composes metrics and limits: metrics supply tokens and cost, the
+// module applies the request limits, and every projection comes from the same
+// computed snapshot.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {UsageModule} from '../../src/usage/module.mjs';
-import {UsageService} from '../../src/usage/service.mjs';
 
 const limits = {
   enabled: true,
@@ -11,43 +13,42 @@ const limits = {
   blockRequests: 3,
 };
 
-function snapshot(usage) {
-  return {
-    statusUsage: {...usage, limits},
-    usageRounds: [{number: 1, requests: usage.internalRequests ?? 0}],
-    listUsage: {available: true, requests: usage.internalRequests ?? 0},
-    computed: {},
-  };
-}
+const SETTINGS = {limits, providersDir: 'providers', pricingFile: 'pricing.json'};
 
-test('UsageModule composes metrics and limits behind one status/list interface', () => {
-  const usage = new UsageModule({
-    operations: {usageForTask: () => snapshot({
+/** Metrics only: no limit fields; the module evaluates `limits` itself. */
+function metrics(requests, extra = {}) {
+  return {
+    statusUsage: {
       available: true,
-      internalRequests: 2,
-      requests: 2,
+      requests,
       requestsWithoutUsage: 0,
       estimatedCostCny: 1,
       costComplete: true,
-      limitState: 'warning',
-    })},
+      warnings: [],
+      ...extra,
+    },
+    usageRounds: [{number: 1, requests}],
+    computed: {marker: requests},
+  };
+}
+
+function moduleWith(requests, extra = {}) {
+  return new UsageModule({
+    configuration: SETTINGS,
+    metrics: {metricsForTask: () => metrics(requests, extra)},
   });
+}
+
+test('UsageModule composes metrics and limits behind one status/list interface', () => {
+  const usage = moduleWith(2);
   const task = {id: 'task-0123456789ab', usageLimits: limits};
   assert.equal(usage.list(task, 'unused').requests, 2);
   assert.equal(usage.status(task, 'unused').usage.limitState, 'warning');
+  assert.equal(usage.list(task, 'unused').limitState, undefined);
 });
 
 test('UsageModule rejects blocked rework without changing the task', () => {
-  const usage = new UsageModule({
-    operations: {usageForTask: () => snapshot({
-      available: true,
-      internalRequests: 3,
-      requests: 3,
-      estimatedCostCny: 1,
-      costComplete: true,
-      limitState: 'blocked',
-    })},
-  });
+  const usage = moduleWith(3);
   const task = {id: 'task-0123456789ab', usageLimits: limits};
   assert.throws(() => usage.decideRework(task, 'unused'), /limit/i);
   assert.equal(task.lastLimitOverride, undefined);
@@ -58,17 +59,10 @@ test('UsageModule parses inputs before command validation and metrics', () => {
   const calls = [];
   const usage = new UsageModule({
     configuration: limits,
-    operations: {
-      usageForTask() {
+    metrics: {
+      metricsForTask() {
         calls.push('metrics');
-        return snapshot({
-          available: true,
-          internalRequests: 1,
-          requests: 1,
-          estimatedCostCny: 1,
-          costComplete: true,
-          limitState: 'ok',
-        });
+        return metrics(1);
       },
     },
   });
@@ -94,15 +88,8 @@ test('UsageModule parses inputs before command validation and metrics', () => {
 
 test('UsageModule turns a blocked override into a detached event and explicit apply', () => {
   const usage = new UsageModule({
-    operations: {usageForTask: () => snapshot({
-      available: true,
-      internalRequests: 3,
-      requests: 3,
-      estimatedCostCny: 1,
-      costComplete: true,
-      limitState: 'blocked',
-    })},
     configuration: limits,
+    metrics: {metricsForTask: () => metrics(3)},
     now: () => '2026-10-28T00:00:00.000Z',
   });
   const task = {id: 'task-0123456789ab'};
@@ -114,16 +101,22 @@ test('UsageModule turns a blocked override into a detached event and explicit ap
   assert.equal(decision.decision.overridden, true);
   assert.equal(task.lastLimitOverride, undefined);
   assert.equal(decision.event.kind, 'limit_override');
-  assert.equal(decision.event.overrideAt, '2026-10-28T00:00:00.000Z');
+  assert.equal(decision.overrideAt, '2026-10-28T00:00:00.000Z');
+  assert.equal(decision.event.at, undefined, 'the journal owns the event stamp');
   assert.equal(decision.requestedLimits.blockRequests, 9);
-  usage.applyRework(task, decision);
-  assert.equal(task.lastLimitOverride.at, '2026-10-28T00:00:00.000Z');
-  assert.equal(task.usageLimits.blockRequests, 9);
+  const reworked = usage.applyRework(task, decision);
+  assert.equal(task.lastLimitOverride, undefined, 'applyRework returns a new record');
+  assert.equal(reworked.lastLimitOverride.at, '2026-10-28T00:00:00.000Z');
+  assert.equal(reworked.usageLimits.blockRequests, 9);
 });
 
 test('UsageModule never throws for unavailable metrics', () => {
   const usage = new UsageModule({
-    operations: {usageForTask: () => { throw new Error('events unavailable'); }},
+    metrics: {
+      metricsForTask() {
+        throw new Error('events unavailable');
+      },
+    },
   });
   const view = usage.view({id: 'task-0123456789ab', model: 'deepseek-flash'}, 'unused');
   assert.equal(view.totals.available, false);
@@ -133,33 +126,26 @@ test('UsageModule never throws for unavailable metrics', () => {
 
 test('view projects the snapshot it already computed instead of scanning twice', () => {
   const calls = [];
-  const result = snapshot({
-    available: true,
-    internalRequests: 1,
-    requests: 1,
-    estimatedCostCny: 1,
-    costComplete: true,
-    limitState: 'ok',
-  });
+  const computed = metrics(1);
   const usage = new UsageModule({
     configuration: limits,
-    operations: {
-      usageForTask() {
+    metrics: {
+      metricsForTask() {
         calls.push('scan');
-        return result;
+        return computed;
       },
-      usageForView(task, directory, options) {
+      usageViewFor(_task, value) {
         calls.push('view');
-        assert.equal(task.id, 'task-0123456789ab');
-        assert.equal(directory, 'unused');
-        assert.equal(options.result, result);
-        return {id: task.id, totals: options.result.statusUsage};
+        assert.equal(value, computed.computed);
+        return {id: 'task-0123456789ab', totals: {available: true}};
       },
     },
   });
   const view = usage.view({id: 'task-0123456789ab', usageLimits: limits}, 'unused');
   assert.deepEqual(calls, ['scan', 'view']);
+  // Totals come from the limit-composed status usage, so status and view agree.
   assert.equal(view.totals.requests, 1);
+  assert.equal(view.totals.limitState, 'ok');
 });
 
 test('a damaged task limit override falls back to the configured limits', () => {
@@ -169,66 +155,45 @@ test('a damaged task limit override falls back to the configured limits', () => 
   };
   const seen = [];
   const usage = new UsageModule({
-    configuration: limits,
-    operations: {
-      usageForTask(taskValue, directory, options) {
-        seen.push({task: taskValue, directory, limits: options.limits});
-        return snapshot({
-          available: true,
-          internalRequests: 1,
-          requests: 1,
-          estimatedCostCny: 1,
-          costComplete: true,
-          limitState: 'ok',
-        });
+    configuration: SETTINGS,
+    metrics: {
+      metricsForTask(_task, directory, options) {
+        seen.push({directory, options});
+        return metrics(1);
       },
-      usageForView: taskValue => ({id: taskValue.id}),
+      usageViewFor: taskValue => ({id: taskValue.id}),
     },
   });
   assert.equal(usage.list(task, 'unused').requests, 1);
   assert.equal(usage.status(task, 'unused').usage.available, true);
-  assert.deepEqual(usage.view(task, 'unused'), {id: task.id});
-  assert.deepEqual(seen.map(call => call.limits), [limits, limits, limits]);
+  const view = usage.view(task, 'unused');
+  assert.equal(view.id, task.id);
+  assert.equal(view.totals.requests, 1);
+  assert.equal(view.totals.limitState, 'ok');
   assert.deepEqual(seen.map(call => call.directory), ['unused', 'unused', 'unused']);
-});
-
-test('UsageService delegates to a module and keeps the operations shape', () => {
-  const operations = {
-    usageForTask: () => snapshot({
-      available: true,
-      internalRequests: 1,
-      requests: 1,
-      estimatedCostCny: 1,
-      costComplete: true,
-      limitState: 'ok',
-    }),
-    usageForView: task => ({id: task.id, projected: true}),
-  };
-  const module = new UsageModule({operations, configuration: limits});
-  const delegated = new UsageService(module);
-  const legacy = new UsageService(operations);
-  const task = {id: 'task-0123456789ab', usageLimits: limits};
-  for (const facade of [delegated, legacy]) {
-    assert.deepEqual(facade.list(task, 'unused'), module.list(task, 'unused'));
-    assert.deepEqual(facade.status(task, 'unused'), module.status(task, 'unused'));
-    assert.deepEqual(facade.view(task, 'unused'), module.view(task, 'unused'));
+  for (const call of seen) {
+    assert.equal(call.options.pricingFile, 'pricing.json');
+    assert.equal(call.options.providersDir, 'providers');
   }
 });
 
-test('UsageService and UsageModule return the same unavailable projections', () => {
-  const operations = {
-    usageForTask() {
+test('UsageModule projects unavailable usage when metrics fail', () => {
+  const metricsDouble = {
+    metricsForTask() {
       throw new Error('events unavailable');
     },
-    usageForView() {
+    usageViewFor() {
       throw new Error('must not be called');
     },
   };
-  const module = new UsageModule({operations});
-  const service = new UsageService(operations);
+  const module = new UsageModule({metrics: metricsDouble});
   const task = {id: 'task-0123456789ab'};
-  assert.deepEqual(service.list(task, 'unused'), module.list(task, 'unused'));
-  assert.deepEqual(service.status(task, 'unused'), module.status(task, 'unused'));
-  assert.deepEqual(service.view(task, 'unused'), module.view(task, 'unused'));
-  assert.equal(service.view(task, 'unused').totals.available, false);
+  assert.deepEqual(module.list(task, 'unused'), {available: false, error: 'events unavailable'});
+  const status = module.status(task, 'unused');
+  assert.equal(status.usage.available, false);
+  assert.equal(status.usage.limitBlocked, false);
+  assert.deepEqual(status.usageRounds, []);
+  const view = module.view(task, 'unused');
+  assert.equal(view.totals.available, false);
+  assert.deepEqual(view.totals, status.usage, 'status and view share one unavailable projection');
 });

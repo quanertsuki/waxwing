@@ -5,12 +5,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 // Isolation MUST be imported before manager.mjs/common.mjs.
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {config,ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const {config,root:ROOT}=runtimeContext();
 
 const samePath=(a,b)=>{const left=path.resolve(a),right=path.resolve(b);return process.platform==='win32'?left.toLowerCase()===right.toLowerCase():left===right;};
 if(samePath(ROOT,REAL_ROOT)) throw new Error(`compact tests refused: common ROOT points at the live root (${ROOT})`);
@@ -26,39 +27,33 @@ const LONG_EVIDENCE='E'.repeat(1000)+'EVIDENCE_TAIL_勿回显';
 const LONG_RESULT='😀'.repeat(40)+'汉字'.repeat(600)+'😀结尾';
 
 function fakeFork() {
-  const child=new EventEmitter();
-  child.stdout=new EventEmitter();child.stderr=new EventEmitter();
-  child.connected=true;child.exitCode=null;child.pid=4343;
-  child.send=message=>{queueMicrotask(()=>onMessage(message,child));};
-  child.kill=()=>{child.exitCode=0;child.emit('exit',0);};
-  return child;
-}
-function onMessage(message,child) {
-  if(message.kind==='close') {child.exitCode=0;setImmediate(()=>child.emit('exit',0));return;}
-  if(message.kind!=='run')return;
-  child.emit('message',{kind:'ready',roundId:message.roundId,ownerMarker:message.ownerMarker});
-  child.emit('message',{kind:'ack',roundId:message.roundId});
-  const finish=()=>{
-    child.emit('message',{kind:'result',roundId:message.roundId,
-      text:message.prompt.includes('[long]')?LONG_RESULT:`done:${message.prompt.slice(0,16)}`,
-      finishReason:'completed'});
-    child.emit('message',{kind:'released',roundId:message.roundId});
-  };
-  if(message.prompt.includes('[empty]')) {
-    setImmediate(()=>{
-      child.emit('message',{kind:'error',roundId:message.roundId,error:'fake failure'});
-      child.emit('message',{kind:'released',roundId:message.roundId});
-    });
-    return;
-  }
-  if(message.prompt.includes('[long-error]')) {
-    setImmediate(()=>{
-      child.emit('message',{kind:'error',roundId:message.roundId,error:'E'.repeat(500)+'ERROR_TAIL'});
-      child.emit('message',{kind:'released',roundId:message.roundId});
-    });
-    return;
-  }
-  if(message.prompt.includes('[slow]')) setTimeout(finish,400); else setImmediate(finish);
+  return createFakeWorker({
+    pid: 4343,
+    onRun: ({message, reply}) => {
+      const roundId = message.roundId;
+      reply.ready({roundId, ownerMarker: message.ownerMarker});
+      reply.ack(roundId);
+      const finish = () => {
+        reply.result(roundId, {text: message.prompt.includes('[long]') ? LONG_RESULT : `done:${message.prompt.slice(0, 16)}`});
+        reply.release(roundId);
+      };
+      if (message.prompt.includes('[empty]')) {
+        setImmediate(() => {
+          reply.error(roundId, {error: 'fake failure'});
+          reply.release(roundId);
+        });
+        return;
+      }
+      if (message.prompt.includes('[long-error]')) {
+        setImmediate(() => {
+          reply.error(roundId, {error: 'E'.repeat(500) + 'ERROR_TAIL'});
+          reply.release(roundId);
+        });
+        return;
+      }
+      if (message.prompt.includes('[slow]')) setTimeout(finish, 400); else setImmediate(finish);
+    },
+  });
 }
 const manager=createManager({forkWorker:fakeFork});
 let counter=0;

@@ -4,10 +4,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const ROOT=runtimeContext().root;
 
 if (path.resolve(ROOT) === path.resolve(REAL_ROOT)) throw new Error(`research tests refused live root ${ROOT}`);
 if (path.resolve(ROOT) !== path.resolve(TEST_ROOT)) throw new Error(`research tests refused non-isolated root ${ROOT}`);
@@ -19,60 +20,35 @@ let pid = 7300;
 function researchFork({failShard = null, hold = false} = {}) {
   const pending = [];
   const stats = {active: 0, maxActive: 0, started: []};
-  const finish = message => {
-    const child = message.child;
-    const id = message.taskId;
-    const shardId = message.shardId;
+  const finish = entry => {
     if (hold) return;
     stats.active -= 1;
-    if (failShard === shardId) {
-      child.emit('message', {kind: 'error', roundId: message.roundId, error: `research failure: ${shardId}`});
+    if (failShard === entry.shardId) {
+      entry.reply.error(entry.roundId, {error: `research failure: ${entry.shardId}`});
     } else {
-      child.emit('message', {
-        kind: 'result',
-        roundId: message.roundId,
-        text: `## Result ${shardId}\n\nSource: https://example.invalid/${shardId}`,
-        finishReason: 'completed',
+      entry.reply.result(entry.roundId, {
+        text: `## Result ${entry.shardId}
+
+Source: https://example.invalid/${entry.shardId}`,
       });
     }
-    child.emit('message', {kind: 'released', roundId: message.roundId});
+    entry.reply.release(entry.roundId);
   };
-  const factory = task => {
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.connected = true;
-    child.exitCode = null;
-    child.signalCode = null;
-    child.pid = ++pid;
-    child.send = message => queueMicrotask(() => {
-      if (message.kind === 'close') {
-        child.exitCode = 0;
-        setImmediate(() => child.emit('exit', 0));
-        return;
-      }
-      if (message.kind !== 'run') return;
+  const factory = () => createFakeWorker({
+    pid: ++pid,
+    onRun: ({message, reply}) => {
+      const roundId = message.roundId;
       stats.active += 1;
       stats.maxActive = Math.max(stats.maxActive, stats.active);
       stats.started.push(message.task.id);
-      child.emit('message', {kind: 'ready', roundId: message.roundId, ownerMarker: message.ownerMarker});
-      child.emit('message', {kind: 'ack', roundId: message.roundId});
-      pending.push({
-        child,
-        taskId: message.task.id,
-        shardId: message.task.shardId,
-        roundId: message.roundId,
-      });
+      reply.ready({roundId, ownerMarker: message.ownerMarker});
+      reply.ack(roundId);
+      pending.push({reply, roundId, taskId: message.task.id, shardId: message.task.shardId});
       if (pending.length === 2) {
         for (const entry of pending.splice(0)) finish(entry);
       }
-    });
-    child.kill = () => {
-      child.exitCode = 0;
-      child.emit('exit', 0);
-    };
-    return child;
-  };
+    },
+  });
   return {factory, stats};
 }
 
@@ -194,6 +170,29 @@ test('research validation rejects duplicate shard IDs before creating a batch', 
     );
     const after = fs.existsSync(BATCHES) ? fs.readdirSync(BATCHES).length : 0;
     assert.equal(after, before);
+    assert.equal(worker.stats.started.length, 0);
+  } finally {
+    await manager.shutdown();
+  }
+});
+
+test('the public create rejects research-only fields instead of building a fake batch task', async () => {
+  const worker = researchFork();
+  const manager = createManager({forkWorker: worker.factory});
+  try {
+    const base = {workspace: scratchRoot, prompt: 'work'};
+    await assert.rejects(
+      () => manager.action('create', {...base, kind: 'research'}),
+      /Invalid argument kind/,
+    );
+    await assert.rejects(
+      () => manager.action('create', {...base, batchId: 'research-abcdefabcdef'}),
+      /Invalid argument batchId/,
+    );
+    await assert.rejects(
+      () => manager.action('create', {...base, shardId: 'alpha'}),
+      /Invalid argument shardId/,
+    );
     assert.equal(worker.stats.started.length, 0);
   } finally {
     await manager.shutdown();

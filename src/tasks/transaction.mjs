@@ -1,4 +1,4 @@
-import {RuntimeCloseOutcome} from '../runtime/close-outcome.mjs';
+import {RuntimeSettlement} from '../runtime/settlement.mjs';
 import {TaskLifecycle, transition} from './lifecycle.mjs';
 
 /**
@@ -10,7 +10,7 @@ import {TaskLifecycle, transition} from './lifecycle.mjs';
  *   runtime.has/get/beginClose/sendClose/waitForExit/forget/closeError
  *   save(task), event(task, payload), untrusted(id, detail)
  *   workspace.materialize/rollback
- *   acceptance.report(task)
+ *   acceptance.writeReportAndSave(task, {save}), acceptance.revoke(task)
  */
 export class TaskTransaction {
   constructor({
@@ -18,6 +18,7 @@ export class TaskTransaction {
     repository,
     save,
     event = () => {},
+    commit = null,
     workspace = {},
     acceptance = {},
     now = () => new Date().toISOString(),
@@ -25,8 +26,7 @@ export class TaskTransaction {
     forceExitTimeoutMs,
     terminate = null,
     untrusted = () => {},
-    runtimeLifecycle = null,
-    closeOutcome = null,
+    settlement = null,
   } = {}) {
     if (!runtime) throw new Error('runtime dependency is required');
     if (!repository) throw new Error('repository dependency is required');
@@ -35,6 +35,7 @@ export class TaskTransaction {
     this.repository = repository;
     this.save = save;
     this.event = event;
+    this.commit = typeof commit === 'function' ? commit : null;
     this.workspace = workspace;
     this.acceptance = acceptance;
     this.now = now;
@@ -42,9 +43,7 @@ export class TaskTransaction {
     this.forceExitTimeoutMs = forceExitTimeoutMs;
     this.terminate = terminate;
     this.onUntrusted = untrusted;
-    this.runtimeLifecycle = runtimeLifecycle;
-    this.closeOutcome = closeOutcome
-      ?? (runtimeLifecycle ? {project: args => runtimeLifecycle.exit(args)} : new RuntimeCloseOutcome({now}));
+    this.settlement = settlement ?? new RuntimeSettlement({now});
   }
 
   /**
@@ -112,7 +111,11 @@ export class TaskTransaction {
         : transition(existing, 'begin_stop');
       this.save(stopping);
       this.event(stopping, {kind: 'stop_requested', closed});
-      if (this.runtime.sendClose(taskId)) this.untrusted(taskId, 'close IPC send failure');
+      // A retained handle whose process already exited has nobody to ask;
+      // skip the close message and go straight to the exit projection.
+      if (!this.runtime.hasExited?.(taskId) && this.runtime.sendClose(taskId)) {
+        this.untrusted(taskId, 'close IPC send failure');
+      }
 
       const graceful = await this.runtime.waitForExit(taskId, this.gracefulExitTimeoutMs);
       if (!graceful) {
@@ -120,7 +123,7 @@ export class TaskTransaction {
         const gone = await this.runtime.waitForExit(taskId, this.forceExitTimeoutMs);
         if (!gone) {
           this.runtime.abortClose?.(taskId);
-          const outcome = this.closeOutcome.project({
+          const outcome = this.settlement.close({
             task: this.repository.peek(taskId) ?? stopping,
             exitConfirmed: false,
           });
@@ -130,7 +133,7 @@ export class TaskTransaction {
       }
 
       const closeError = this.runtime.closeError(taskId);
-      const outcome = this.closeOutcome.project({
+      const outcome = this.settlement.close({
         task: this.repository.peek(taskId) ?? stopping,
         exitConfirmed: true,
         closeError,
@@ -158,15 +161,7 @@ export class TaskTransaction {
       const finalTask = {...transitioned, error: reason ?? transitioned.error};
       let savedTask = finalTask;
       try {
-        if (closed && typeof this.acceptance.writeReportAndSave === 'function') {
-          savedTask = this.acceptance.writeReportAndSave(finalTask, {save: this.save}).task ?? finalTask;
-        } else {
-          if (closed && typeof this.acceptance.report === 'function') {
-            const report = this.acceptance.report(finalTask);
-            finalTask.reportHash = report.hash;
-          }
-          savedTask = this.save(finalTask) ?? finalTask;
-        }
+        savedTask = this.commitFinal(finalTask, closed);
       } catch (error) {
         this.runtime.abortClose?.(taskId);
         throw error;
@@ -188,12 +183,21 @@ export class TaskTransaction {
     const latest = this.repository.peek(taskId) ?? existing;
     const transitioned = transition(latest, action);
     const finalTask = {...transitioned, error: reason ?? transitioned.error};
-    if (closed && typeof this.acceptance.report === 'function') {
-      const report = this.acceptance.report(finalTask);
-      finalTask.reportHash = report.hash;
-    }
     this.event(finalTask, {kind: closed ? 'closed' : 'cancelled'});
-    return {task: this.save(finalTask), unchanged: false};
+    return {task: this.commitFinal(finalTask, closed), unchanged: false};
+  }
+
+  /**
+   * Persist the terminal record. A close writes the report and the record that
+   * carries its hash as one sequence: the report is rolled back if the save
+   * fails, so a reader can never see a new report pointing at an old task.
+   */
+  commitFinal(task, closed) {
+    if (!closed) return this.save(task) ?? task;
+    if (typeof this.acceptance?.writeReportAndSave !== 'function') {
+      throw new Error('acceptance.writeReportAndSave is required to close a task');
+    }
+    return this.acceptance.writeReportAndSave(task, {save: this.save}).task ?? task;
   }
 
   /**
@@ -224,6 +228,7 @@ export class TaskTransaction {
     effort = null,
     policy = {meta: {}, text: null},
     configure,
+    events = [],
   } = {}) {
     const startedAt = this.now();
     let current = this.repository.peek(taskId);
@@ -259,7 +264,7 @@ export class TaskTransaction {
       };
     }
     const number = next.rounds.length + 1;
-    next.rounds.push({
+    next.rounds = [...next.rounds, {
       roundId,
       number,
       prompt,
@@ -267,9 +272,17 @@ export class TaskTransaction {
       maxTokens,
       effort,
       policy: policy?.meta ?? {},
-    });
-    this.save(next);
-    this.event(next, {kind: 'round_started', roundId, number, maxTokens, effort});
+    }];
+    const roundStarted = {kind: 'round_started', roundId, number, maxTokens, effort};
+    if (this.commit) {
+      // Extra events (a rework override) share the round-start commit, so a
+      // failed gate can no longer leave an event without the matching record.
+      this.commit(next, [...events, roundStarted]);
+    } else {
+      this.save(next);
+      for (const payload of events) this.event(next, payload);
+      this.event(next, roundStarted);
+    }
     return {task: next, roundId, number, startedAt};
   }
 

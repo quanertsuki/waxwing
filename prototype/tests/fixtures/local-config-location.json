@@ -1,0 +1,92 @@
+{
+  "description": "Local override resolution shared by prototype/config.mjs (loadConfiguration) and desktop/src-tauri/src/paths.rs (local_config_location_from_parts). {base} is a fresh temporary directory per case, {home} is {base}/home, {config} is {base}/config, and {cwd} is each side's current directory. Every case pins WAXWING_HOME so neither side can touch the real per-user directory.",
+  "cases": [
+    {
+      "name": "an explicit environment file wins over both existing files",
+      "env": {
+        "WAXWING_HOME": "{base}/home",
+        "WAXWING_LOCAL_CONFIG": "{cwd}/custom/local.json"
+      },
+      "homeFile": true,
+      "legacyFile": true,
+      "expect": {
+        "path": "{cwd}/custom/local.json",
+        "source": "env"
+      }
+    },
+    {
+      "name": "the legacy alias variable resolves against the current directory",
+      "env": {
+        "WAXWING_HOME": "{base}/home",
+        "DSH_SUBAGENT_LOCAL_CONFIG": "{cwd}/custom/legacy-alias.json"
+      },
+      "homeFile": true,
+      "legacyFile": true,
+      "expect": {
+        "path": "{cwd}/custom/legacy-alias.json",
+        "source": "env"
+      }
+    },
+    {
+      "name": "an empty environment value is ignored",
+      "env": {
+        "WAXWING_HOME": "{base}/home",
+        "WAXWING_LOCAL_CONFIG": ""
+      },
+      "homeFile": true,
+      "legacyFile": true,
+      "expect": {
+        "path": "{home}/config.local.json",
+        "source": "home"
+      }
+    },
+    {
+      "name": "the per-user file hides the legacy file",
+      "env": {
+        "WAXWING_HOME": "{base}/home"
+      },
+      "homeFile": true,
+      "legacyFile": true,
+      "expect": {
+        "path": "{home}/config.local.json",
+        "source": "home"
+      }
+    },
+    {
+      "name": "the legacy file is read when the per-user file is absent",
+      "env": {
+        "WAXWING_HOME": "{base}/home"
+      },
+      "homeFile": false,
+      "legacyFile": true,
+      "expect": {
+        "path": "{config}/config.local.json",
+        "source": "legacy"
+      }
+    },
+    {
+      "name": "the per-user path is the default when neither file exists",
+      "env": {
+        "WAXWING_HOME": "{base}/home"
+      },
+      "homeFile": false,
+      "legacyFile": false,
+      "expect": {
+        "path": "{home}/config.local.json",
+        "source": null
+      }
+    },
+    {
+      "name": "a relative WAXWING_HOME anchors at the current directory",
+      "env": {
+        "WAXWING_HOME": "relative-home"
+      },
+      "homeFile": false,
+      "legacyFile": false,
+      "expect": {
+        "path": "{cwd}/relative-home/config.local.json",
+        "source": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "dataRoot": "C:/Waxwing",
+  "runsDir": "C:/Waxwing/runs",
+  "reportsDir": "C:/Waxwing/reports",
+  "runtimeDir": "C:/Waxwing/runtime",
+  "researchRoot": "C:/Waxwing-research",
+  "providersDir": "C:/Waxwing/providers",
+  "configPath": "C:/Waxwing-backend/prototype/config.json",
+  "localConfigPath": "C:/Waxwing/config.local.json",
+  "localConfigSource": null,
+  "node": "C:/Waxwing-node/node.exe",
+  "port": 43187,
+  "managerScript": "C:/Waxwing-backend/prototype/server.mjs",
+  "managerDir": "C:/Waxwing-backend/prototype",
+  "managerUrl": "http://127.0.0.1:43187/api",
+  "tokenFile": "C:/Waxwing/runtime/server-token"
+}

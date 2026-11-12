@@ -4,11 +4,14 @@ import test, {after} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import {EventEmitter} from 'node:events';
+import {createFakeWorker} from './fake-worker.mjs';
 import {fileURLToPath} from 'node:url';
 import {REAL_ROOT,TEST_ROOT} from './isolate.mjs';
 import {createManager} from '../manager.mjs';
-import {config,ROOT} from '../common.mjs';
+import {runtimeContext} from '../common.mjs';
+const ROOT=runtimeContext().root;
+// Test-owned configuration: mutations affect only this manager instance.
+const config={...runtimeContext().config};
 
 const samePath=(a,b)=>{
   const left=path.resolve(a),right=path.resolve(b);
@@ -28,138 +31,89 @@ let child;
 let workspaceCounter=0;
 
 function forkWorker() {
-  const value=new EventEmitter();
-  value.stdout=new EventEmitter();
-  value.stderr=new EventEmitter();
-  value.connected=true;
-  value.exitCode=null;
-  value.signalCode=null;
-  value.pid=4900+runs.length;
-  value.send=message=>queueMicrotask(()=>onMessage(message,value));
-  value.kill=()=>{
-    value.exitCode=0;
-    value.emit('exit',0);
-  };
+  const value=createFakeWorker({
+    pid:4900+runs.length,
+    onRun:({message,worker,reply})=>handleRun(message,worker,reply),
+    onClose:({worker})=>{
+      if(worker.pendingRelease) {
+        const pending=worker.pendingRelease;
+        worker.pendingRelease=null;
+        pending();
+      }
+      worker.exitCode=0;
+      setImmediate(()=>worker.emit('exit',0));
+    },
+  });
   child=value;
   return value;
 }
 
-function release(message,worker,text='done') {
-  worker.emit('message',{kind:'released',roundId:message.roundId});
+function release(message,reply,text='done') {
+  reply.release(message.roundId);
   releases.push(message.roundId);
   return text;
 }
 
-function onMessage(message,worker) {
-  if(message.kind==='close') {
-    if(worker.pendingRelease) {
-      const pending=worker.pendingRelease;
-      worker.pendingRelease=null;
-      pending();
-    }
-    worker.exitCode=0;
-    setImmediate(()=>worker.emit('exit',0));
-    return;
-  }
-  if(message.kind!=='run')return;
+function handleRun(message,worker,reply) {
+  const roundId=message.roundId;
   const entry={
-    roundId:message.roundId,
+    roundId,
     taskId:message.task.id,
     prompt:message.prompt,
     provider:message.task.provider?.type,
     release:null,
   };
   runs.push(entry);
-  worker.emit('message',{
-    kind:'ready',
-    roundId:message.roundId,
-    ownerMarker:message.ownerMarker,
-    pid:worker.pid,
-    startedAt:new Date().toISOString(),
-  });
+  reply.ready({roundId, ownerMarker:message.ownerMarker, pid:worker.pid, startedAt:new Date().toISOString()});
   if(message.prompt.includes('[no-ack]'))return;
-  worker.emit('message',{kind:'ack',roundId:message.roundId});
+  reply.ack(roundId);
 
   if(message.prompt.includes('[hold-result]')) {
-    worker.emit('message',{
-      kind:'result',
-      roundId:message.roundId,
-      text:'first result',
-      finishReason:'completed',
-    });
-    entry.release=()=>release(message,worker);
+    reply.result(roundId,{text:'first result'});
+    entry.release=()=>release(message,reply);
     return;
   }
   if(message.prompt.includes('[hold-error]')) {
-    worker.emit('message',{
-      kind:'error',
-      roundId:message.roundId,
-      error:'first provider failed',
-      finishReason:'error',
-    });
-    entry.release=()=>release(message,worker);
+    reply.error(roundId,{error:'first provider failed'});
+    entry.release=()=>release(message,reply);
     return;
   }
   if(message.prompt.includes('[release-on-close]')) {
-    worker.emit('message',{
-      kind:'result',
-      roundId:message.roundId,
-      text:'waiting for close',
-      finishReason:'completed',
-    });
-    worker.pendingRelease=()=>release(message,worker);
+    reply.result(roundId,{text:'waiting for close'});
+    worker.pendingRelease=()=>release(message,reply);
     return;
   }
   if(message.prompt.includes('[stale-heartbeat]')) {
-    worker.emit('message',{kind:'heartbeat',roundId:message.roundId,at:new Date().toISOString()});
-    entry.release=()=>release(message,worker);
+    reply.heartbeat(roundId);
+    entry.release=()=>release(message,reply);
     return;
   }
   if(message.prompt.includes('[stale-event]')) {
-    worker.emit('message',{
-      kind:'event',
-      roundId:'round-00000000-0000-4000-8000-000000000000',
-      notification:{params:{event:{type:'late/old-round'}}},
-    });
+    reply.event('round-00000000-0000-4000-8000-000000000000',{type:'late/old-round'});
   }
   if(message.prompt.includes('[duplicate-result]')) {
-    worker.emit('message',{
-      kind:'result',
-      roundId:message.roundId,
-      text:'only result',
-      finishReason:'completed',
-    });
-    worker.emit('message',{
-      kind:'result',
-      roundId:message.roundId,
-      text:'duplicate must be ignored',
-      finishReason:'completed',
-    });
-    entry.release=()=>release(message,worker);
+    reply.result(roundId,{text:'only result'});
+    reply.result(roundId,{text:'duplicate must be ignored'});
+    entry.release=()=>release(message,reply);
     setImmediate(()=>entry.release?.());
     return;
   }
   if(message.prompt.includes('[worker-busy]')) {
-    worker.emit('message',{kind:'worker_busy',roundId:message.roundId});
+    reply.busy(roundId);
     return;
   }
   if(message.prompt.includes('[release-only]')) {
-    entry.release=()=>release(message,worker);
+    entry.release=()=>release(message,reply);
     setImmediate(()=>entry.release?.());
     return;
   }
-  worker.emit('message',{kind:'heartbeat',roundId:message.roundId,at:new Date().toISOString()});
-  worker.emit('message',{
-    kind:'result',
-    roundId:message.roundId,
-    text:'done',
-    finishReason:'completed',
-  });
-  entry.release=()=>release(message,worker);
+  reply.heartbeat(roundId);
+  reply.result(roundId,{text:'done'});
+  entry.release=()=>release(message,reply);
   setImmediate(()=>entry.release?.());
 }
 
-const manager=createManager({forkWorker});
+const manager=createManager({forkWorker,config});
 after(()=>manager.shutdown());
 const newWorkspace=()=>{
   const dir=path.join(base,`ws-${++workspaceCounter}`);

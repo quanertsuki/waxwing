@@ -1,6 +1,7 @@
-use crate::paths;
+// Settings are read from and written by the manager. Rust no longer parses the
+// configuration files; it forwards the validated settings the Node side owns.
+use crate::manager;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,99 +21,72 @@ pub struct UsageLimits {
     pub block_requests: u32,
 }
 
-fn default_settings() -> Settings {
-    Settings {
-        default_provider: "dsh-sdk".to_string(),
-        fallback_provider: "dsh-sdk".to_string(),
-        usage_limits: UsageLimits {
-            enabled: false,
-            warn_cost_cny: 3.0,
-            block_cost_cny: 5.0,
-            warn_requests: 100,
-            block_requests: 160,
-        },
-    }
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSettingsResult {
+    pub saved: bool,
+    pub restart_required: bool,
+    pub settings: Settings,
 }
 
 #[tauri::command]
 pub async fn get_settings() -> Result<Settings, String> {
-    let config = Value::Object(paths::effective_config()?);
-    let defaults = default_settings();
-
-    let settings = Settings {
-        default_provider: config["defaultProvider"]
-            .as_str()
-            .unwrap_or(&defaults.default_provider)
-            .to_string(),
-        fallback_provider: config["fallbackProvider"]
-            .as_str()
-            .unwrap_or(&defaults.fallback_provider)
-            .to_string(),
-        usage_limits: UsageLimits {
-            enabled: config["usageLimits"]["enabled"]
-                .as_bool()
-                .unwrap_or(defaults.usage_limits.enabled),
-            warn_cost_cny: config["usageLimits"]["warnCostCny"]
-                .as_f64()
-                .unwrap_or(defaults.usage_limits.warn_cost_cny),
-            block_cost_cny: config["usageLimits"]["blockCostCny"]
-                .as_f64()
-                .unwrap_or(defaults.usage_limits.block_cost_cny),
-            warn_requests: config["usageLimits"]["warnRequests"]
-                .as_u64()
-                .unwrap_or(defaults.usage_limits.warn_requests as u64)
-                as u32,
-            block_requests: config["usageLimits"]["blockRequests"]
-                .as_u64()
-                .unwrap_or(defaults.usage_limits.block_requests as u64)
-                as u32,
-        },
-    };
-
-    Ok(settings)
+    let result = manager::request("settings_get", serde_json::json!({})).await?;
+    serde_json::from_value(result).map_err(|error| format!("Failed to parse settings: {error}"))
 }
 
 #[tauri::command]
-pub async fn save_settings(settings: Settings) -> Result<(), String> {
-    let path = paths::local_config_path()?;
-    let mut config = paths::read_json_object(&path)?;
-    let mut usage_limits = config
-        .get("usageLimits")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+pub async fn save_settings(settings: Settings) -> Result<SaveSettingsResult, String> {
+    let result = manager::request(
+        "settings_save",
+        serde_json::to_value(settings).map_err(|error| error.to_string())?,
+    )
+    .await?;
+    serde_json::from_value(result)
+        .map_err(|error| format!("Failed to parse the saved settings: {error}"))
+}
 
-    config.insert(
-        "defaultProvider".to_string(),
-        Value::String(settings.default_provider),
-    );
-    config.insert(
-        "fallbackProvider".to_string(),
-        Value::String(settings.fallback_provider),
-    );
-    usage_limits.insert(
-        "enabled".to_string(),
-        Value::Bool(settings.usage_limits.enabled),
-    );
-    usage_limits.insert(
-        "warnCostCny".to_string(),
-        Value::from(settings.usage_limits.warn_cost_cny),
-    );
-    usage_limits.insert(
-        "blockCostCny".to_string(),
-        Value::from(settings.usage_limits.block_cost_cny),
-    );
-    usage_limits.insert(
-        "warnRequests".to_string(),
-        Value::from(settings.usage_limits.warn_requests),
-    );
-    usage_limits.insert(
-        "blockRequests".to_string(),
-        Value::from(settings.usage_limits.block_requests),
-    );
-    config.insert("usageLimits".to_string(), Value::Object(usage_limits));
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    paths::write_json_object(&path, &config)?;
+    #[test]
+    fn settings_round_trip_through_the_manager_shape() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "defaultProvider": "dsh-sdk",
+            "fallbackProvider": "dsh-sdk",
+            "usageLimits": {
+                "enabled": false,
+                "warnCostCny": 3,
+                "blockCostCny": 5,
+                "warnRequests": 100,
+                "blockRequests": 160
+            }
+        }))
+        .expect("settings must deserialize");
 
-    Ok(())
+        assert_eq!(settings.default_provider, "dsh-sdk");
+        assert_eq!(settings.usage_limits.block_requests, 160);
+
+        let result: SaveSettingsResult = serde_json::from_value(serde_json::json!({
+            "saved": true,
+            "restartRequired": false,
+            "localConfigPath": "C:/data/config.local.json",
+            "settings": {
+                "defaultProvider": "dsh-sdk",
+                "fallbackProvider": "dsh-sdk",
+                "usageLimits": {
+                    "enabled": true,
+                    "warnCostCny": 1,
+                    "blockCostCny": 2,
+                    "warnRequests": 3,
+                    "blockRequests": 4
+                }
+            }
+        }))
+        .expect("save result must deserialize");
+
+        assert!(result.saved);
+        assert!(!result.restart_required);
+    }
 }

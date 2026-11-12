@@ -17,10 +17,14 @@ import {randomUUID} from 'node:crypto';
 import {
   DEFAULT_ACK_TIMEOUT_MS,
   HEARTBEAT_STALE_MS,
+  ROUND_MESSAGE_KINDS,
+  closeMessage,
   createRoundId,
   isRoundId,
+  runMessage,
+  validateMessage,
 } from './protocol.mjs';
-import {RuntimeSupervisor} from './supervisor.mjs';
+import {RuntimeSettlement} from './settlement.mjs';
 
 /**
  * Resolve the configured round timers into one value object. The Runtime module,
@@ -42,11 +46,56 @@ export function roundTimeouts(source = {}) {
   };
 }
 
-const ROUND_SCOPED_KINDS = new Set(['ack', 'heartbeat', 'event', 'result', 'error', 'released']);
 const ACTIVE_EVENT_PHASES = new Set(['running', 'awaiting_ack']);
 const DEFAULT_HEARTBEAT_CHECK_MS = 5_000;
 const DEFAULT_EXIT_TIMEOUT_MS = 14_000;
 const FORCE_EXIT_TIMEOUT_MS = 5_000;
+
+// Release and exit gates. A terminal message is not permission to dispatch the
+// next round: only an explicit `released` opens the gate, and only the process
+// handle can confirm an exit. Only `Runtime` uses these.
+
+/** Release every waiter on the gate with one verdict. */
+function settleRecordRelease(record, value) {
+  if (!record?.releaseWaiters) return;
+  const waiters = record.releaseWaiters.splice(0);
+  for (const resolve of waiters) resolve(value);
+}
+
+/** Resolve once the active round releases; an exited record yields false. */
+function waitForRecordRelease(record) {
+  if (!record || record.phase === 'idle') return Promise.resolve(true);
+  if (record.phase === 'exited') return Promise.resolve(false);
+  return new Promise(resolve => record.releaseWaiters.push(resolve));
+}
+
+/** True only when the process handle reports an exit code or signal. */
+function recordHasExited(record) {
+  const value = record?.w;
+  return value?.exitCode !== null && value?.exitCode !== undefined
+    || value?.signalCode !== null && value?.signalCode !== undefined;
+}
+
+/** Wait for the owned process exit event, including an already-exited handle. */
+function waitForRecordExit(record, timeoutMs) {
+  return new Promise(resolve => {
+    if (recordHasExited(record)) {
+      resolve(true);
+      return;
+    }
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      record.w.off?.('exit', onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    record.w.once?.('exit', onExit) ?? record.w.on?.('exit', onExit);
+  });
+}
 
 /**
  * Hooks the manager (or a test double) implements:
@@ -68,7 +117,9 @@ const FORCE_EXIT_TIMEOUT_MS = 5_000;
 export class Runtime {
   constructor(hooks = {}, options = {}) {
     this.hooks = hooks;
-    this.supervisor = options.supervisor ?? new RuntimeSupervisor();
+    // Process failures are projected through the same settlement rules the
+    // manager uses for every other runtime fact.
+    this.settlement = options.settlement ?? new RuntimeSettlement();
     this.records = new Map();
     // A worker can report a close error and exit immediately; keep that fact
     // until the close transaction has persisted its outcome.
@@ -76,14 +127,29 @@ export class Runtime {
   }
 
   // --- identity state --------------------------------------------------------
-  /** True while an owned process handle is retained, so the workspace stays locked. */
+  /**
+   * True while an owned handle is retained, including one whose process has
+   * already exited. The handle outlives the exit so a failed final save can be
+   * retried; only `forget` removes it.
+   */
   has(id) { return this.records.has(id); }
   get(id) { return this.records.get(id) ?? null; }
+  /** Every retained handle, exited-but-unforgotten ones included. */
   ids() { return [...this.records.keys()]; }
+  /**
+   * True only while the owned process has not been observed to exit. Callers
+   * that mean "a Worker is (or may be) writing" use this instead of `has`.
+   */
+  isLive(id) {
+    const rec = this.records.get(id);
+    return Boolean(rec) && rec.phase !== 'exited';
+  }
+  /** Ids of processes that have not been observed to exit. */
+  liveIds() { return [...this.records.values()].filter(rec => rec.phase !== 'exited').map(rec => rec.id); }
   /** Drop an owned handle once its exit is demonstrably confirmed. */
   forget(id) {
     const rec = this.records.get(id);
-    if (rec && this.supervisor.hasExited(rec)) {
+    if (rec && recordHasExited(rec)) {
       this.records.delete(id);
       this.closeErrors.delete(id);
       return true;
@@ -107,16 +173,16 @@ export class Runtime {
   // --- gates -----------------------------------------------------------------
   /** Resolve only once the active round has released, never on a bare result. */
   waitForRelease(value) {
-    return this.supervisor.waitForRelease(this.#rec(value));
+    return waitForRecordRelease(this.#rec(value));
   }
 
   waitForExit(value, timeoutMs = DEFAULT_EXIT_TIMEOUT_MS) {
     const rec = this.#rec(value);
     if (!rec) return Promise.resolve(true);
-    return this.supervisor.waitForExit(rec, timeoutMs);
+    return waitForRecordExit(rec, timeoutMs);
   }
 
-  hasExited(value) { return this.supervisor.hasExited(this.#rec(value)); }
+  hasExited(value) { return recordHasExited(this.#rec(value)); }
 
   isClosing(id) { return Boolean(this.records.get(id)?.closing); }
 
@@ -145,7 +211,7 @@ export class Runtime {
     const rec = this.records.get(id);
     if (!rec) return null;
     try {
-      if (rec.w.connected) rec.w.send({kind: 'close'});
+      if (rec.w.connected) rec.w.send(closeMessage());
       return null;
     } catch (error) {
       const detail = `close request failed: ${error.message}`;
@@ -165,12 +231,12 @@ export class Runtime {
   reportHealth(task, rec, health, detail = null) {
     if (!rec || rec.health === health) return;
     rec.health = health;
-    task.runtimeHealth = health;
-    try { this.persist(task, rec, detail ? {healthDetail: detail} : {}); } catch {}
+    const next = {...task, runtimeHealth: health};
     try {
-      this.hooks.event?.({task, payload: {kind: 'runtime_health', health, detail}});
-      this.hooks.save?.({task});
+      const runtime = this.persist(next, rec, detail ? {healthDetail: detail} : {});
+      if (runtime) next.runtime = runtime;
     } catch {}
+    this.#commit(next, {kind: 'runtime_health', health, detail});
   }
 
   /**
@@ -207,16 +273,15 @@ export class Runtime {
     this.armAckTimer(rec, roundId, timeouts.ackTimeoutMs);
     this.armHeartbeatWatch(rec, roundId, timeouts.heartbeatStaleMs, timeouts.heartbeatCheckMs);
     if (Number(timeouts.roundTimeoutMs) > 0) this.armRoundTimer(rec, roundId, timeouts.roundTimeoutMs);
-    const message = {
-      kind: 'run',
+    const message = runMessage({
       roundId,
       task,
       prompt: options.prompt,
       maxTokens: options.maxTokens,
       effort: options.effort ?? null,
       ownerMarker: rec.ownerMarker,
-    };
-    if (options.budgetFile) message.budgetFile = options.budgetFile;
+      budgetFile: options.budgetFile,
+    });
     try {
       rec.w.send(message);
     } catch (error) {
@@ -253,8 +318,12 @@ export class Runtime {
     };
     this.records.set(task.id, rec);
     this.closeErrors.delete(task.id);
-    task.runtimeHealth = rec.health;
-    try { this.persist(task, rec); } catch {}
+    const next = {...task, runtimeHealth: rec.health};
+    try {
+      const runtime = this.persist(next, rec);
+      if (runtime) next.runtime = runtime;
+    } catch {}
+    this.#commit(next);
     for (const stream of [handle.stdout, handle.stderr]) {
       stream?.on?.('data', chunk => this.hooks.log?.({
         task: this.hooks.latest?.(task.id) ?? task,
@@ -275,20 +344,38 @@ export class Runtime {
     const rec = this.records.get(taskId);
     if (!rec) return;
 
+    const checked = validateMessage(msg);
+    if (!checked.ok) {
+      this.noteIgnored(task, rec, msg, checked.reason);
+      return;
+    }
+    if (msg.kind === 'closed') {
+      // The Worker finished its own close; process exit remains the gate.
+      rec.workerClosed = true;
+      return;
+    }
+
     if (msg.kind === 'ready') {
-      task.runtimeReady = true;
       if (msg.ownerMarker && msg.ownerMarker !== rec.ownerMarker) {
         rec.unreworkableReason = 'Runtime identity marker did not match; create a new task';
         this.reportHealth(task, rec, 'unhealthy', 'owner marker mismatch');
         return;
       }
-      rec.identityVerified = Boolean(msg.ownerMarker === rec.ownerMarker);
-      this.persist(task, rec, {
-        workerPid: msg.pid ?? rec.w.pid ?? null,
-        workerStartedAt: msg.startedAt ?? null,
-        identityVerified: rec.identityVerified,
-      });
-      this.hooks.save?.({task});
+      const identityVerified = Boolean(msg.ownerMarker === rec.ownerMarker);
+      // The Worker re-sends `ready` on every openai-chat round. An unchanged
+      // state is not a write.
+      if (task.runtimeReady === true && rec.identityVerified === identityVerified) return;
+      rec.identityVerified = identityVerified;
+      const next = {...task, runtimeReady: true};
+      try {
+        const runtime = this.persist(next, rec, {
+          workerPid: msg.pid ?? rec.w.pid ?? null,
+          workerStartedAt: msg.startedAt ?? null,
+          identityVerified,
+        });
+        if (runtime) next.runtime = runtime;
+      } catch {}
+      this.#commit(next);
       return;
     }
 
@@ -308,7 +395,7 @@ export class Runtime {
       return;
     }
 
-    if (ROUND_SCOPED_KINDS.has(msg.kind)) {
+    if (ROUND_MESSAGE_KINDS.has(msg.kind)) {
       if (!isRoundId(msg.roundId) || msg.roundId !== rec.roundId) {
         this.noteIgnored(task, rec, msg, 'roundId does not match the active round');
         return;
@@ -324,8 +411,7 @@ export class Runtime {
       rec.phase = 'running';
       rec.lastHeartbeatAt = Date.now();
       this.reportHealth(task, rec, 'healthy');
-      this.hooks.event?.({task, payload: {kind: 'round_ack', roundId: msg.roundId}});
-      this.hooks.save?.({task});
+      this.#commit(task, {kind: 'round_ack', roundId: msg.roundId});
       return;
     }
 
@@ -341,10 +427,13 @@ export class Runtime {
         this.noteIgnored(task, rec, msg, 'task is not accepting round events');
         return;
       }
-      this.hooks.event?.({task, payload: msg});
       const notification = msg.notification;
-      task.lastEvent = notification.params?.event?.type ?? notification.method;
-      task.eventCount = (task.eventCount ?? 0) + 1;
+      const next = {
+        ...task,
+        lastEvent: notification.params?.event?.type ?? notification.method,
+        eventCount: (task.eventCount ?? 0) + 1,
+      };
+      this.#commit(next, msg);
       return;
     }
 
@@ -395,16 +484,18 @@ export class Runtime {
       rec.rejectedRound = false;
       rec.lastHeartbeatAt = null;
       rec.health = 'idle';
-      released.runtimeHealth = 'idle';
-      this.hooks.event?.({task: released, payload: {kind: 'round_released', roundId: msg.roundId}});
-      this.persist(released, rec);
-      this.hooks.save?.({task: released});
+      const next = {...released, runtimeHealth: 'idle'};
+      try {
+        const runtime = this.persist(next, rec);
+        if (runtime) next.runtime = runtime;
+      } catch {}
+      this.#commit(next, {kind: 'round_released', roundId: msg.roundId});
       // Releasing the gate is what lets a queued rework or Provider fallback
       // dispatch; nothing may start a new round before this point.
-      this.supervisor.settleRelease(rec, true);
+      settleRecordRelease(rec, true);
       const fallback = rec.pendingFallback;
       rec.pendingFallback = null;
-      this.hooks.released?.({task: released, rec, fallback});
+      this.hooks.released?.({task: next, rec, fallback});
       return;
     }
   }
@@ -413,18 +504,16 @@ export class Runtime {
     const rec = this.records.get(taskId);
     if (!rec) return;
     this.hooks.untrusted?.({id: taskId, detail: 'process error'});
-    const task = this.hooks.latest?.(taskId);
-    if (!task) return;
-    const message = `Task ${taskId} worker error: ${error.message}`;
     this.clearMonitors(rec);
     rec.phase = 'exited';
-    this.supervisor.settleRelease(rec, false);
-    try { this.persist(task, rec, {exitReason: message}); } catch {}
-    if (task.status === 'running') {
-      const failed = this.hooks.transition({task, action: 'fail'});
-      failed.error = message;
-      try { this.hooks.save?.({task: failed}); } catch {}
-    }
+    settleRecordRelease(rec, false);
+    const task = this.hooks.latest?.(taskId);
+    if (!task) return;
+    let runtime = null;
+    try { runtime = this.persist(task, rec, {exitReason: `Task ${taskId} worker error: ${error.message}`}); } catch {}
+    const outcome = this.settlement.processError({task, error});
+    if (runtime) outcome.task = {...outcome.task, runtime};
+    this.#settle(outcome);
   }
 
   onProcessExit(taskId, code) {
@@ -434,15 +523,16 @@ export class Runtime {
     rec.phase = 'exited';
     // A runtime that exited before releasing its round may never resume, so
     // whoever waits at the gate gets false rather than a silent stall.
-    this.supervisor.settleRelease(rec, false);
-    this.records.delete(taskId);
+    settleRecordRelease(rec, false);
+    // The handle stays until `forget`: a terminal record that failed to save
+    // must still find a retryable `stopping` task. `isLive` reports the exit.
     const task = this.hooks.latest?.(taskId);
-    try { if (task) this.persist(task, rec, {exitCode: code}); } catch {}
-    if (task?.status === 'running') {
-      const failed = this.hooks.transition({task, action: 'fail'});
-      failed.error = `Task ${taskId} worker exited (${code}); inspect runtime.log`;
-      try { this.hooks.save?.({task: failed}); } catch {}
-    }
+    let runtime = null;
+    try { if (task) runtime = this.persist(task, rec, {exitCode: code}); } catch {}
+    if (!task) return;
+    const outcome = this.settlement.processExited({task, code});
+    if (runtime) outcome.task = {...outcome.task, runtime};
+    this.#settle(outcome);
   }
 
   // --- internals -------------------------------------------------------------
@@ -451,20 +541,38 @@ export class Runtime {
     return value ?? null;
   }
 
+  /** Execute the journal and persistence order for a settlement result. */
+  #settle(outcome) {
+    if (outcome?.event) this.#commit(outcome.task, outcome.event);
+  }
+
+  /**
+   * One write for the task record and its event. `commit` is the manager's
+   * single path; the older event/save pair remains only for test doubles.
+   */
+  #commit(task, payload = null) {
+    try {
+      if (typeof this.hooks.commit === 'function') {
+        this.hooks.commit({task, payload});
+        return;
+      }
+      if (payload) this.hooks.event?.({task, payload});
+      this.hooks.save?.({task});
+    } catch {}
+  }
+
   persist(task, rec, extra) {
     return this.hooks.persist?.({task, rec, extra});
   }
 
   noteIgnored(task, rec, msg, reason) {
-    try {
-      this.hooks.event?.({task, payload: {
-        kind: 'runtime_message_ignored',
-        messageKind: msg?.kind ?? null,
-        messageRoundId: msg?.roundId ?? null,
-        expectedRoundId: rec.roundId,
-        reason,
-      }});
-    } catch {}
+    this.#commit(task, {
+      kind: 'runtime_message_ignored',
+      messageKind: msg?.kind ?? null,
+      messageRoundId: msg?.roundId ?? null,
+      expectedRoundId: rec.roundId,
+      reason,
+    });
   }
 
   clearAckTimer(rec) {

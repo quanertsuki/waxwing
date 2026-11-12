@@ -6,6 +6,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
   checkReleaseTree,
+  discoverSourceModules,
   findMachineSpecificPath,
   packagedRequired,
   required,
@@ -14,6 +15,38 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(HERE, '../../src/app.mjs');
+
+test('the release tree requires every source module, discovered from src/', () => {
+  const onDisk = walk(path.resolve(HERE, '../../src'))
+    .filter(file => file.endsWith('.mjs'))
+    .map(file => `src/${file}`);
+  assert.ok(onDisk.length > 0);
+  for (const file of onDisk) {
+    assert.ok(required.includes(file), `release tree omits source module: ${file}`);
+  }
+  for (const file of [
+    'src/adapters/cli.mjs',
+    'src/adapters/mcp.mjs',
+    'src/providers/registry.mjs',
+    'src/runtime/identity.mjs',
+    'src/workspace/git.mjs',
+  ]) {
+    assert.ok(required.includes(file), `previously missing module is still absent: ${file}`);
+  }
+});
+
+test('source discovery follows the directory instead of a static list', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'waxwing-src-discovery-'));
+  try {
+    fs.mkdirSync(path.join(root, 'src', 'nested'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'src', 'nested', 'example.mjs'), '');
+    fs.writeFileSync(path.join(root, 'src', 'root.mjs'), '');
+    fs.writeFileSync(path.join(root, 'src', 'notes.json'), '{}');
+    assert.deepEqual(discoverSourceModules(root), ['src/nested/example.mjs', 'src/root.mjs']);
+  } finally {
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
 
 test('the release tree requires every path exported by the public composition root', () => {
   const source = fs.readFileSync(APP, 'utf8');

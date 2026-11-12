@@ -8,7 +8,7 @@ import {
   removeWorktree,
   rollbackWorktree,
 } from './git.mjs';
-import {pathsOverlap} from '../../prototype/common.mjs';
+import {pathsOverlap} from '../paths/path-utils.mjs';
 
 const MODES = new Set(['auto', 'worktree', 'shared']);
 const DEFAULT_GIT = {
@@ -196,9 +196,10 @@ export class WorkspaceLeaseManager {
       };
     }
     const result = this.git.removeWorktree({repoRoot: lease.repoRoot, worktreePath: lease.worktreePath});
-    if (result.removed) lease.status = 'removed';
     return {
       ...result,
+      // The lease is returned, never edited: the caller commits the new task.
+      lease: result.removed ? {...lease, status: 'removed'} : lease,
       workspacePath: lease.worktreePath,
       branch: lease.branch,
       baseCommit: lease.baseCommit,
