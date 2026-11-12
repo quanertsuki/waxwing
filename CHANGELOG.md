@@ -3,7 +3,7 @@
 Waxwing follows the basic structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and uses semantic versioning for public releases.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-12
 
 ### Changed
 
@@ -130,8 +130,7 @@ and uses semantic versioning for public releases.
 
 ### Removed
 
-The next release is 0.3.0: these public exports and modules are removed
-without a deprecation release.
+These public exports and modules are removed without a deprecation release.
 
 - `RuntimeSupervisor`, `RuntimeLifecycle`, and `RuntimeOutcomeSettlement`
   (`src/runtime/supervisor.mjs`, `lifecycle.mjs`, `outcome.mjs`); use

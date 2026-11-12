@@ -9,7 +9,7 @@ worker Agent implements it, and the delegating party independently inspects the
 evidence before accepting the result.
 
 CLI, MCP stdio, and the Tauri desktop app are three adapters over one manager
-listening only on `127.0.0.1`. The current release is a `0.2.0` preview intended
+listening only on `127.0.0.1`. The current release is a `0.3.0` preview intended
 for a trusted local user and a trusted delegating Agent, not a public or
 multi-tenant service.
 
@@ -201,8 +201,7 @@ waxwing-mcp
 ```
 
 Public tools use the `waxwing_*` prefix. The complete `ds_*` catalogue remains
-available throughout `0.1.x` for compatibility and is scheduled for removal no
-earlier than `0.2.0`.
+available as a compatibility alias.
 
 Core tools include `create`, `list`, `status`, `wait`, `rework`, `accept`, `cancel`,
 `close`, `cleanup_worktree`, `export`, `preview_delete`, and `delete`. Research
