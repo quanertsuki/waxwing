@@ -10,7 +10,10 @@ export class ProviderAdapter {
      * the options the adapter declares.
      *
      * effort: reasoning effort is sent to the endpoint
-     * sessionContinuity: the adapter keeps a session across rounds in-process
+     * sessionContinuity: how a rework round sees earlier rounds — false (it
+     *   does not), 'process' (a session held by this Worker process), or
+     *   'file' (the task's conversation file, which any Worker can read; the
+     *   manager names it in the run message)
      * budgetPatch: the task needs a runtime patch plus a per-round budget file
      */
     static capabilities() {
@@ -42,7 +45,9 @@ export class ProviderAdapter {
      * Execute one round of conversation.
      * @param {object} params
      * @param {string} params.prompt - User prompt (may include execution policy)
-     * @param {Array} params.history - Conversation history in Anthropic format
+     * @param {string} [params.conversationFile] - The task's conversation
+     *   file, when the provider declares sessionContinuity 'file'
+     * @param {string} [params.roundId] - The round being run
      * @param {Array} params.tools - Available tools in Anthropic format
      * @param {number} params.maxTokens - Output token budget for this round
      * @param {AbortSignal} params.signal - Cancellation signal

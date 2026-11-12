@@ -155,6 +155,29 @@ without a deprecation release.
 - The Worker builds its Provider adapter from the current round's Provider, so
   a fallback reusing the same Worker process no longer calls the failed
   Provider's endpoint; the provider config is copied instead of mutated
+- openai-chat rework rounds now continue the previous conversation instead of
+  starting empty. The adapter keeps one JSON line per round in
+  `runs/<id>/conversation.jsonl` (written atomically, failed rounds kept up to
+  their last complete tool exchange), so the history survives a new Worker
+  process. Requests are fitted to the provider's optional `contextWindow`:
+  whole old rounds are dropped first, then old tool exchanges of the current
+  round, with a system note saying what was left out; tool calls and results
+  stay paired, and a request that still cannot fit fails with
+  `context_overflow` before it is sent. A first-round Provider fallback starts
+  a fresh conversation. `sessionContinuity` is now `false`, `'process'` (DSH),
+  or `'file'` (openai-chat); the manager names the conversation file in the run
+  message only for `'file'`. The never-populated `task.history` read and the
+  adapter's unused Anthropic-history conversion are removed
+- A `'file'`-continuity task can rework after its Worker exited, including
+  after a manager restart, instead of requiring the original process. The
+  manager proves the old process is gone from the retained handle or, without
+  one, from `runtime.json` plus identity verification; an alive or unverifiable
+  PID, an untrusted runtime, a workspace taken by another live task, and a
+  removed or repurposed worktree still refuse with a specific reason. The old
+  handle is forgotten before `openRound` spawns the new Worker, the journal
+  records `runtime_respawned`, and the untrusted verdict is written to
+  `runtime.json` so it survives both the process exit and a restart. DSH
+  (`'process'`) tasks keep their original refusal
 
 ## [0.2.0] - 2026-10-28
 

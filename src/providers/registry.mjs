@@ -47,6 +47,10 @@ export function validateProviderConfig(config) {
             throw new Error(`Provider ${config.name}: maxToolRequests must be a nonnegative safe integer`);
         }
     }
+    if (config.contextWindow !== undefined && config.contextWindow !== null &&
+        (!Number.isSafeInteger(config.contextWindow) || config.contextWindow <= 0)) {
+        throw new Error(`Provider ${config.name}: contextWindow must be a positive safe integer`);
+    }
     if (config.stream !== undefined && typeof config.stream !== 'boolean') {
         throw new Error(`Provider ${config.name}: stream must be a boolean`);
     }

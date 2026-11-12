@@ -7,6 +7,7 @@ import {
   inspectGitWorkspace,
   removeWorktree,
   rollbackWorktree,
+  worktreeIdentity,
 } from './git.mjs';
 import {pathsOverlap} from '../paths/path-utils.mjs';
 
@@ -18,6 +19,7 @@ const DEFAULT_GIT = {
   inspectGitWorkspace,
   removeWorktree,
   rollbackWorktree,
+  worktreeIdentity,
 };
 
 function codedError(code, message) {
@@ -220,6 +222,45 @@ export class WorkspaceLeaseManager {
       throw new Error('Runtime identity is unverified; resolve the residual process manually before cleaning the worktree');
     }
     return this.cleanup(task.workspaceLease);
+  }
+
+  /**
+   * Facts for continuing a task in its existing worktree after its runtime
+   * exited. `null` means there is no isolated worktree to check. A reusable
+   * worktree is present, is still the lease's Git root, and still has the task
+   * branch checked out. A dirty worktree is expected: it holds the task's
+   * uncommitted work. The caller turns these facts into the refusal text.
+   */
+  verifyForReuse(task) {
+    const lease = task?.workspaceLease;
+    if (!lease || lease.mode !== 'worktree') return null;
+    const facts = {
+      mode: lease.mode,
+      status: lease.status ?? null,
+      expectedRoot: lease.worktreePath ?? null,
+      expectedBranch: lease.branch ?? null,
+      missing: false,
+      root: null,
+      branch: null,
+      rootError: null,
+    };
+    if (lease.status === 'removed' || !lease.executionWorkspace ||
+        !fs.existsSync(lease.executionWorkspace)) {
+      return {...facts, missing: true};
+    }
+    try {
+      const identity = this.git.worktreeIdentity(lease.executionWorkspace);
+      return {
+        ...facts,
+        root: identity.root,
+        branch: identity.branch,
+        rootError: identity.error ?? null,
+      };
+    } catch (error) {
+      // Inspection can fail on a locked or damaged checkout; that is an
+      // unverified worktree, not a thrown status request.
+      return {...facts, rootError: error?.message ?? String(error)};
+    }
   }
 
   inspect(lease, taskWorkspace) {

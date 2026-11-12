@@ -14,6 +14,7 @@ import {DEFAULT_EFFORT, resolveRoundEffort} from './effort.mjs';
 import {UsageModule} from '../src/usage/module.mjs';
 import {ExecutionPolicy} from '../src/tasks/execution-policy.mjs';
 import {capabilitiesFor, prepareTask, resolveProvider} from '../src/providers/registry.mjs';
+import {conversationFileFor, resetConversation} from '../src/providers/conversation.mjs';
 import {Runtime, DEFAULT_EXIT_TIMEOUT_MS, FORCE_EXIT_TIMEOUT_MS, roundTimeouts} from '../src/runtime/module.mjs';
 import {RuntimeSettlement} from '../src/runtime/settlement.mjs';
 import {WorkspaceLeaseManager} from '../src/workspace/lease-manager.mjs';
@@ -115,6 +116,9 @@ export function createManager(options = {}) {
   // must prove its identity first; a handle this manager spawned already does.
   const terminateRuntime = options.terminateRuntime ?? (record => terminateVerifiedRuntime(record));
   const killOwned = options.killOwnedRuntime ?? (handle => killOwnedRuntime(handle));
+  // Restart recovery checks a PID found on disk; tests inject a deterministic
+  // verdict instead of inspecting the host process table.
+  const verifyRuntimeIdentity = options.verifyRuntimeIdentity ?? verifyOwnedRuntime;
   ensureDataDirs(context);
   // UsageModule keeps the limit object it was constructed with, so make sure a
   // configuration without limits still yields one stable object.
@@ -210,6 +214,10 @@ export function createManager(options = {}) {
   function supportsEffort(provider) {
     try { return capabilitiesFor(provider).effort; } catch { return false; }
   }
+  /** The adapter declares how a rework round sees earlier rounds. */
+  function sessionContinuityFor(provider) {
+    try { return capabilitiesFor(provider).sessionContinuity ?? false; } catch { return false; }
+  }
   /** Built-in providers plus JSON provider files share one resolver. */
   function providerByName(name) {
     return resolveProvider(config.providersDir, name, {model: config.model});
@@ -235,10 +243,52 @@ export function createManager(options = {}) {
       live: id => workers.live(id),
     });
   }
+  /** The persisted runtime projection, or null when it is absent or corrupt. */
+  function readRuntimeRecord(id) {
+    try { return JSON.parse(fileSystem.readFileSync(runtimeFile(id), 'utf8')); }
+    catch { return null; }
+  }
+  /**
+   * Evidence for continuing a task whose Worker is gone. A retained handle is
+   * authoritative: its phase says whether the process exited, and its
+   * unreworkable reason survives the exit until forget. After a restart there
+   * is no handle, so runtime.json plus identity verification must prove the
+   * old process is dead; an unverifiable PID is not proof.
+   */
+  function continuationFacts(t, rec) {
+    const lease = workspaceLeases.verifyForReuse(t);
+    if (rec) {
+      return {
+        exitConfirmed: rec.phase === 'exited',
+        unreworkableReason: rec.unreworkableReason ?? null,
+        identity: null,
+        pid: rec.w?.pid ?? null,
+        manualActionRequired: false,
+        lease,
+      };
+    }
+    const record = readRuntimeRecord(t.id);
+    let identity = null;
+    if (record) {
+      try { identity = verifyRuntimeIdentity(record); }
+      catch (error) { identity = {verified: false, alive: null, reason: shortMessage(error)}; }
+    }
+    return {
+      exitConfirmed: identity?.alive === false,
+      unreworkableReason: record?.unreworkableReason ?? null,
+      identity,
+      pid: record?.pid ?? null,
+      manualActionRequired: t.runtime?.manualActionRequired === true ||
+        t.workspaceLease?.status === 'locked-unverified',
+      lease,
+    };
+  }
   /**
    * One read-only decision for both the rework action and status summaries.
    * Runtime facts are read through this closure, so a retained handle's
    * unreworkable reason and the closing flag stay next to the handle itself.
+   * Continuity facts are lazy because identity and worktree verification run
+   * a process or a Git command and only matter when the runtime is missing.
    */
   const rework = new TaskRework({
     usage: usageModule,
@@ -246,11 +296,22 @@ export function createManager(options = {}) {
     isShuttingDown: () => shuttingDown,
     runtimeFacts: t => {
       const rec = workers.get(t.id);
-      return {
+      const facts = {
         closing: Boolean(rec?.closing),
         live: workers.live(t.id),
         unreworkableReason: rec?.unreworkableReason ?? null,
+        sessionContinuity: sessionContinuityFor(t.provider),
       };
+      let continuation = null;
+      let read = false;
+      Object.defineProperty(facts, 'continuation', {
+        enumerable: true,
+        get() {
+          if (!read) { read = true; continuation = continuationFacts(t, rec); }
+          return continuation;
+        },
+      });
+      return facts;
     },
     workspaceConflict,
     directory: id => directory(id),
@@ -347,6 +408,12 @@ export function createManager(options = {}) {
     const rec = workers.get(id);
     if (rec && !rec.unreworkableReason) {
       rec.unreworkableReason = `Runtime ${detail}; the old session state is untrusted and cannot be reworked; create a new task for follow-up work`;
+      // The process may exit before the next projection is written, and a
+      // restart would then lose the verdict with the handle. Write it now.
+      const task = repository.peek(id);
+      if (task) {
+        try { persistRuntimeRecord(task, rec, {unreworkableReason: rec.unreworkableReason}); } catch {}
+      }
     }
   }
   /**
@@ -566,7 +633,7 @@ export function createManager(options = {}) {
           try { runtime = JSON.parse(fileSystem.readFileSync(path.join(directory(name), 'runtime.json'), 'utf8')); } catch {}
         }
         if (runtime) {
-          const verification = verifyOwnedRuntime(runtime);
+          const verification = verifyRuntimeIdentity(runtime);
           const outcome = settlement.recover({task: t, runtime, identity: verification});
           if (outcome.decision !== 'not-recoverable') {
             runtime = outcome.runtime;
@@ -614,6 +681,9 @@ export function createManager(options = {}) {
       phase: rec.phase,
       health: rec.health,
       lastHeartbeatAt: rec.lastHeartbeatAt ? new Date(rec.lastHeartbeatAt).toISOString() : null,
+      // A reason recorded before the exit must outlive the process, so a
+      // restart can still refuse to reuse an untrusted old session.
+      unreworkableReason: rec.unreworkableReason ?? null,
       updatedAt: now(),
       ...extra,
     };
@@ -711,12 +781,20 @@ export function createManager(options = {}) {
     const saved = commit(outcome.task, [outcome.event]);
     runtime.reportHealth(saved, rec, outcome.health.health, outcome.health.detail);
   }
-  /** Deferred Provider fallback starts only after the failed round released. */
+  /**
+   * Deferred Provider fallback starts only after the failed round released.
+   * The fallback model starts a fresh conversation: the failed attempt on the
+   * other model is dropped rather than continued.
+   */
   function handoffReleased(fallback) {
     if (!fallback) return;
     const failed = repository.peek(fallback.taskId);
     if (!failed) return;
-    void executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort).catch(error => {
+    const start = async () => {
+      resetConversation(conversationFileFor(directory(fallback.taskId)));
+      return executeRun(failed, fallback.prompt, fallback.maxTokens, fallback.effort);
+    };
+    void start().catch(error => {
       const latest = repository.peek(fallback.taskId);
       if (latest && latest.status !== 'failed') {
         persistFailure(settlement.fallbackFailed({
@@ -777,6 +855,10 @@ export function createManager(options = {}) {
         effort,
         // Only a provider that declares a budget patch gets a per-round file.
         budgetFile: capabilitiesFor(next.provider).budgetPatch ? budgetFileFor(directory(next.id)) : null,
+        // A file-continuity provider reads and extends the task's conversation.
+        conversationFile: sessionContinuityFor(next.provider) === 'file'
+          ? conversationFileFor(directory(next.id))
+          : null,
         timeouts: roundTimeouts(config),
       });
     } catch (error) {
@@ -917,9 +999,17 @@ export function createManager(options = {}) {
       // failure leaves both task.json and events.jsonl unchanged.
       const decision = rework.decide(t, a);
       if (!decision.allowed) throw new Error(decision.reason);
+      const events = decision.event ? [decision.event] : [];
+      if (decision.respawn) {
+        // A retained handle whose process already exited must leave the map
+        // before openRound, or the Runtime would send the round to the dead
+        // Worker instead of spawning the one that reads the conversation file.
+        runtime.forget(t.id);
+        events.push({kind: 'runtime_respawned'});
+      }
       return executeRun(t, decision.prompt, decision.maxTokens, decision.effort, {
         configure: value => Object.assign(value, decision.record),
-        events: decision.event ? [decision.event] : [],
+        events,
       });
     },
     cleanup_worktree(a) {

@@ -281,6 +281,7 @@ export class Runtime {
       effort: options.effort ?? null,
       ownerMarker: rec.ownerMarker,
       budgetFile: options.budgetFile,
+      conversationFile: options.conversationFile,
     });
     try {
       rec.w.send(message);

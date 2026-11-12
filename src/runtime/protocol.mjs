@@ -74,7 +74,7 @@ function isNotification(value) {
 }
 
 /** Build the run message the manager sends. */
-export function runMessage({roundId, task, prompt, maxTokens, effort = null, ownerMarker, budgetFile}) {
+export function runMessage({roundId, task, prompt, maxTokens, effort = null, ownerMarker, budgetFile, conversationFile}) {
   if (!isRoundId(roundId)) throw new Error('A valid roundId is required');
   const message = {
     kind: 'run',
@@ -87,6 +87,8 @@ export function runMessage({roundId, task, prompt, maxTokens, effort = null, own
     ownerMarker,
   };
   if (budgetFile) message.budgetFile = budgetFile;
+  // Named only for a provider that keeps continuity in a file.
+  if (conversationFile) message.conversationFile = conversationFile;
   return message;
 }
 
@@ -99,6 +101,10 @@ export function parseRunMessage(message) {
   if (!isRoundId(message.roundId)) return {ok: false, reason: 'run requires a valid roundId'};
   if (!message.task || typeof message.task !== 'object') return {ok: false, reason: 'run requires a task'};
   if (typeof message.prompt !== 'string') return {ok: false, reason: 'run requires a prompt'};
+  if (message.conversationFile !== undefined &&
+      (typeof message.conversationFile !== 'string' || !message.conversationFile)) {
+    return {ok: false, reason: 'run conversationFile must be a nonempty string'};
+  }
   return {ok: true, reason: null, message};
 }
 

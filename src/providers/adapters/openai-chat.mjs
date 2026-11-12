@@ -1,89 +1,16 @@
 // OpenAI /v1/chat/completions provider adapter.
 // Supports any OpenAI-compatible endpoint (RL2 gateway, DeepSeek official, etc.).
-// Reuses conversion logic from rl2_proxy.cjs but runs in-process without HTTP proxy.
+// Runs the tool loop in-process. Rework continuity lives in the task's
+// conversation file (../conversation.mjs), so it survives a new Worker.
 
 import https from 'node:https';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import {ProviderAdapter} from './base.mjs';
+import {completePairs, fitConversation, readConversation, saveConversation} from '../conversation.mjs';
 
 function genId(prefix) {
     return prefix + crypto.randomBytes(12).toString('hex');
-}
-
-// Convert Anthropic message history to OpenAI format
-function toOpenAIMessages(body) {
-    const out = [];
-    const sys = body.system;
-    if (sys) {
-        const text = typeof sys === 'string' ? sys
-            : Array.isArray(sys) ? sys.map(b => (typeof b === 'string' ? b : b?.text) || '').join('\n')
-            : String(sys);
-        if (text.trim()) out.push({role: 'system', content: text});
-    }
-    for (const msg of body.messages || []) {
-        const role = msg.role;
-        let content = msg.content;
-        if (typeof content === 'string') content = [{type: 'text', text: content}];
-        if (!Array.isArray(content)) content = [];
-        if (role === 'assistant') {
-            const text = content.filter(b => b?.type === 'text').map(b => b.text || '').join('');
-            const toolUses = content.filter(b => b?.type === 'tool_use');
-            const m = {role: 'assistant', content: text || null};
-            if (toolUses.length) {
-                m.tool_calls = toolUses.map(tu => ({
-                    id: tu.id || genId('call_'),
-                    type: 'function',
-                    function: {name: tu.name, arguments: JSON.stringify(tu.input || {})}
-                }));
-            }
-            out.push(m);
-        } else if (role === 'user') {
-            const toolResults = content.filter(b => b?.type === 'tool_result');
-            const others = content.filter(b => !b || b.type !== 'tool_result');
-            for (const tr of toolResults) {
-                out.push({role: 'tool', tool_call_id: tr.tool_use_id, content: stringifyToolResult(tr.content)});
-            }
-            const parts = contentToParts(others);
-            if (parts.length) {
-                const onlyText = parts.every(p => p.type === 'text');
-                out.push({role: 'user', content: onlyText ? parts.map(p => p.text).join('\n') : parts});
-            }
-        } else if (role === 'system') {
-            out.push({role: 'system', content: stringifyToolResult(msg.content)});
-        }
-    }
-    return out;
-}
-
-function contentToParts(blocks) {
-    const parts = [];
-    for (const b of blocks) {
-        if (!b || typeof b !== 'object') continue;
-        if (b.type === 'text') parts.push({type: 'text', text: b.text || ''});
-        else if (b.type === 'image' && b.source) {
-            if (b.source.type === 'base64') {
-                parts.push({type: 'image_url', image_url: {url: `data:${b.source.media_type};base64,${b.source.data}`}});
-            } else if (b.source.type === 'url') {
-                parts.push({type: 'image_url', image_url: {url: b.source.url}});
-            }
-        }
-    }
-    return parts;
-}
-
-function stringifyToolResult(content) {
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-        return content.map(c => {
-            if (!c || typeof c !== 'object') return '';
-            if (c.type === 'text') return c.text || '';
-            if (c.type === 'image') return '[image]';
-            return '';
-        }).filter(Boolean).join('\n');
-    }
-    if (content == null) return '';
-    return JSON.stringify(content);
 }
 
 function toOpenAITools(tools) {
@@ -330,7 +257,7 @@ function usageEvents(response, providerName, defaultModel) {
 
 export class OpenAIChatAdapter extends ProviderAdapter {
     static capabilities(config) {
-        return {effort: config?.supportsReasoning === true, sessionContinuity: false, budgetPatch: false};
+        return {effort: config?.supportsReasoning === true, sessionContinuity: 'file', budgetPatch: false};
     }
 
     /**
@@ -357,20 +284,54 @@ export class OpenAIChatAdapter extends ProviderAdapter {
         if (!this.apiKey) throw new Error('apiKey is required');
     }
 
-    async run({prompt, history, tools, maxTokens, effort, signal, onToolCall, onEvent}) {
+    /**
+     * One round. With a `conversationFile` the round continues the stored
+     * conversation and is appended to it when it ends, failed rounds
+     * included; see ../conversation.mjs for the format and the window rule.
+     */
+    async run({prompt, tools, maxTokens, effort, signal, onToolCall, onEvent, conversationFile, roundId}) {
         this.validate();
+        const emit = event => onEvent?.(event);
+        const stored = conversationFile ? readConversation(conversationFile) : {rounds: [], error: null};
+        if (stored.error) {
+            emit({type: 'provider/conversation-unreadable', time: Date.now(), data: {error: stored.error}});
+        }
+        // This round's own messages: the prompt, then complete tool exchanges.
+        const current = [{role: 'user', content: prompt}];
+        const save = finishReason => {
+            if (!conversationFile) return;
+            try {
+                saveConversation(conversationFile, [...stored.rounds, {
+                    roundId: roundId ?? null,
+                    provider: this.name,
+                    model: this.model,
+                    finishReason,
+                    messages: completePairs(current),
+                }]);
+            } catch (error) {
+                // The round's work already happened; losing the transcript
+                // costs the next rework its memory, not this round its result.
+                emit({type: 'provider/conversation-save-failed', time: Date.now(), data: {error: error.message}});
+            }
+        };
+        try {
+            const result = await this.#toolLoop({history: stored.rounds, current, tools, maxTokens, effort,
+                signal, onToolCall, emit});
+            current.push({role: 'assistant', content: result.text});
+            save(result.finishReason);
+            return result;
+        } catch (error) {
+            save(error.finishReason ?? 'error');
+            throw error;
+        }
+    }
 
-        // Build OpenAI-format message array from Anthropic history
-        const messages = toOpenAIMessages({
-            system: '',
-            messages: [...(history || []), {role: 'user', content: prompt}]
-        });
+    async #toolLoop({history, current, tools, maxTokens, effort, signal, onToolCall, emit}) {
         const openaiTools = toOpenAITools(tools || []);
-
         const url = endpointUrl(this.baseUrl);
         const allEvents = [];
         let requestCount = 0;
-        const emit = event => onEvent?.(event);
+        let reportedOmission = '0/0';
 
         for (;;) {
             if (this.maxToolRequests !== null && requestCount >= this.maxToolRequests) {
@@ -382,9 +343,17 @@ export class OpenAIChatAdapter extends ProviderAdapter {
             }
             requestCount++;
 
+            const fitted = fitConversation({history, current, contextWindow: this.config.contextWindow,
+                maxTokens, tools: openaiTools});
+            const omission = `${fitted.omitted.rounds}/${fitted.omitted.exchanges}`;
+            if (omission !== reportedOmission) {
+                reportedOmission = omission;
+                emit({type: 'provider/conversation-trimmed', time: Date.now(), data: {request: requestCount,
+                    omittedRounds: fitted.omitted.rounds, omittedExchanges: fitted.omitted.exchanges}});
+            }
             const req = {
                 model: this.model,
-                messages,
+                messages: fitted.messages,
                 max_tokens: maxTokens,
                 stream: this.stream
             };
@@ -458,7 +427,7 @@ export class OpenAIChatAdapter extends ProviderAdapter {
             }
 
             // Tool calls: append assistant message with tool_calls, then execute tools
-            messages.push({
+            current.push({
                 role: 'assistant',
                 content: msg.content || null,
                 tool_calls: msg.tool_calls
@@ -471,7 +440,7 @@ export class OpenAIChatAdapter extends ProviderAdapter {
                 // onToolCall must return {content: string} or string
                 const toolResult = onToolCall ? await onToolCall(fnName, fnArgs) : {content: `[Tool ${fnName} not executed: no handler]`};
                 const content = typeof toolResult === 'string' ? toolResult : (toolResult?.content || '');
-                messages.push({
+                current.push({
                     role: 'tool',
                     tool_call_id: tc.id,
                     content
